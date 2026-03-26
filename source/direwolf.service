@@ -1,0 +1,13 @@
+[Unit]
+Description=Dire Wolf APRS TNC. Version 2.0
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=meshnet
+ExecStart=/usr/local/bin/direwolf -c /etc/direwolf.conf -t 0
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

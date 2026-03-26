@@ -1,0 +1,26 @@
+[Unit]
+Description=Socat bridge Meshtastic USB -> PTY Version 2.0
+After=local-fs.target
+Wants=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+
+ExecStart=/usr/bin/socat -d -d -d \
+PTY,link=/dev/ttyV0,raw,echo=0,waitslave,mode=660,group=dialout \
+FILE:/dev/ttyUSB0,raw,echo=0,b115200,nonblock
+
+Restart=always
+RestartSec=2
+
+# Protección real
+KillMode=process
+TimeoutStopSec=5
+
+# Evita problemas de permisos y entorno
+ExecStartPre=/bin/sleep 2
+
+[Install]
+WantedBy=multi-user.target

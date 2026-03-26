@@ -1,0 +1,7 @@
+[Unit]
+Description=Watchdog USB MiniBroker. Version 2.0
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/minibroker/.env-usb
+ExecStart=/usr/local/bin/minibroker_usb_watchdog.sh

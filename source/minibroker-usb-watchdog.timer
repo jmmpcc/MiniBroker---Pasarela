@@ -1,0 +1,10 @@
+[Unit]
+Description=Ejecución periódica del watchdog USB del MiniBroker. VErsion 2.0
+
+[Timer]
+OnBootSec=45
+OnUnitActiveSec=60
+Unit=minibroker-usb-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=MiniBroker Emergencias USB 24x7. Version 2.0
+After=network-online.target meshtastic-socat.service
+Wants=network-online.target
+Requires=meshtastic-socat.service
+
+[Service]
+Type=simple
+User=meshnet
+Group=meshnet
+WorkingDirectory=/opt/minibroker
+EnvironmentFile=/opt/minibroker/.env-usb
+ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_broker.py --mesh-port /dev/ttyV0 --bind 127.0.0.1 --port 8765 --ctrl-host 127.0.0.1 --ctrl-port 8766 --data-dir /opt/minibroker/data
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+StartLimitBurst=0
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

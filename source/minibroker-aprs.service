@@ -1,0 +1,18 @@
+[Unit]
+Description=MiniBroker APRS Bridge. Version 2.0
+After=network.target direwolf.service minibroker-emergencias.service
+Requires=direwolf.service minibroker-emergencias.service
+
+[Service]
+Type=simple
+User=meshnet
+Group=meshnet
+WorkingDirectory=/opt/minibroker
+EnvironmentFile=/opt/minibroker/.env-usb
+ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_aprs_bridge.py
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
