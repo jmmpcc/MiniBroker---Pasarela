@@ -5,7 +5,37 @@
 > **Tecnologías:** Meshtastic · MeshCore · APRS RF · APRS-IS · Python 3.10+ · systemd  
 > **Audiencia:** Radioaficionados, operadores de emergencias, integradores de red mesh  
 
+## Atribución obligatoria
+
+Este proyecto ha sido desarrollado por **J.M.M (EB2EAS)**.
+
+Cualquier uso, redistribución, modificación, integración o creación de
+derivados deberá incluir una referencia clara y visible al autor original
+y un enlace al repositorio principal.
+
+Ejemplo recomendado:
+“Basado en el proyecto desarrollado por J.M.M (EB2EAS)”.
+
+## Condición para forks y proyectos derivados
+
+Cualquier fork o proyecto derivado que emplee una parte sustancial de este
+código deberá incluir en su README un apartado visible reconociendo al autor
+original: “Proyecto basado en el trabajo de J.M.M (EB2EAS)”.
+
+Esta condición forma parte de la licencia MIT utilizada en este repositorio.
 ---
+
+### 🌐 Guía ESCENARIOS configuración nodos
+
+> 🔄 Documentación exponiendo los escenarios supuestos de configuración de los nodos (Meshtastic y Meshcore)  
+> incluyendo configuración, ejemplos, variables de entorno y modos de operación.
+
+📘 **[Abrir guía completa (.md) → Escenarios_nodos.md](./Documentos/Escenarios_nodos.md)**
+
+📘 **[Abrir guía completa (.pdf) → Escenarios_nodos.pdf](./Documentos/Escenarios_nodos.pdf)**
+
+---
+
 
 ## Tabla de contenidos
 
