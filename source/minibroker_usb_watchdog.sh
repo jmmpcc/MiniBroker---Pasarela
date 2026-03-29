@@ -119,57 +119,44 @@ fi
 # 8) Comprobación de estado lógico del broker (anti-zombie)
 STATUS_FILE="/opt/minibroker/data/broker_status.json"
 
-if [ -f "$STATUS_FILE" ]; then
-    last_packet=$(/usr/bin/python3 - <<'PY' "$STATUS_FILE"
-import json, sys
-try:
-    with open(sys.argv[1], "r", encoding="utf-8") as fh:
-        data = json.load(fh)
-    v = data.get("last_packet_ts")
-    print("" if v is None else v)
-except Exception:
-    print("")
-PY
-)
+# 8) Comprobación de estado lógico del broker (anti-zombie)
+#    Política corregida:
+#    - No reiniciar por simple ausencia de tráfico.
+#    - Reiniciar solo si el fichero de estado es inválido/corrupto
+#      o si el broker declara un estado imposible durante tiempo prolongado.
+STATUS_FILE="/opt/minibroker/data/broker_status.json"
 
-    now=$(date +%s)
-
-    if [ -n "$last_packet" ]; then
-        last_packet_int="${last_packet%.*}"
-        case "$last_packet_int" in
-            ''|*[!0-9]*)
-                last_packet_int=0
-                ;;
-        esac
-        diff=$((now - last_packet_int))
-
-        if [ "$diff" -gt 60 ]; then
-            log "Broker sin tráfico >60s (posible zombie). Reiniciando $BROKER_SERVICE"
-            /usr/bin/systemctl restart "$BROKER_SERVICE"
-            exit 0
-        fi
-    fi
+if [ ! -f "$STATUS_FILE" ]; then
+    log "STATUS_FILE ausente: $STATUS_FILE. Reiniciando $BROKER_SERVICE"
+    /usr/bin/systemctl restart "$BROKER_SERVICE"
+    exit 0
 fi
 
-if [ -f "$STATUS_FILE" ]; then
-    last_packet=$(grep -o '"last_packet_ts":[0-9.]*' "$STATUS_FILE" | cut -d: -f2)
-    now=$(date +%s)
+if ! /usr/bin/python3 - <<'PY' "$STATUS_FILE"
+import json, sys
+p = sys.argv[1]
+with open(p, "r", encoding="utf-8") as f:
+    data = json.load(f)
 
-    if [ -n "$last_packet" ]; then
-        last_packet_int="${last_packet%.*}"
-        case "$last_packet_int" in
-            ''|*[!0-9]*)
-                last_packet_int=0
-                ;;
-        esac
-        diff=$((now - last_packet_int))
+# Validación mínima de estructura
+if not isinstance(data, dict):
+    raise SystemExit(2)
 
-        if [ "$diff" -gt 60 ]; then
-            log "Broker sin tráfico >60s (posible zombie). Reiniciando $BROKER_SERVICE"
-            /usr/bin/systemctl restart "$BROKER_SERVICE"
-            exit 0
-        fi
-    fi
+status = str(data.get("status", "")).strip().lower()
+if status not in {"running", "connecting", "cooldown", "disconnected"}:
+    raise SystemExit(3)
+
+nodes = data.get("nodes", [])
+if nodes is not None and not isinstance(nodes, list):
+    raise SystemExit(4)
+
+raise SystemExit(0)
+PY
+then
+    rc=$?
+    log "broker_status.json inválido/corrupto (rc=$rc). Reiniciando $BROKER_SERVICE"
+    /usr/bin/systemctl restart "$BROKER_SERVICE"
+    exit 0
 fi
 
 # 9) ⭐ NUEVO: Supervisión extendida de MeshCore

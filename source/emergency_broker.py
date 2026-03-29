@@ -1147,7 +1147,7 @@ class _NodeManagerBase(abc.ABC):
         if self.nd.tx_block_during_cooldown and self.state.cooldown_remaining() > 0:
             raise RuntimeError("tx blocked by cooldown")
         self._do_send(text=text, ch=ch, dest=dest, ack=ack)
-
+    
     def _do_send(self, *, text: str, ch: int, dest: str | None, ack: bool) -> None:
         """
         Envía un mensaje por la interfaz activa del nodo.
@@ -1155,11 +1155,19 @@ class _NodeManagerBase(abc.ABC):
         Subclases pueden sobreescribir este método si el mecanismo de envío
         difiere del patrón sendText de Meshtastic (ej. MeshCore asyncio).
 
+        Lógica de radio/Meshtastic aplicada:
+            - Si ``dest`` tiene valor, el envío se realiza como mensaje dirigido
+            usando ``destinationId``.
+            - Si ``dest`` es ``None``, el envío se realiza como broadcast de canal
+            y NO se incluye ``destinationId``.
+            - Se prueban varias firmas compatibles con distintas versiones del
+            SDK Meshtastic (``channelIndex``/``channel`` y con/sin ``wantAck``).
+
         Args:
             text: Texto a enviar.
-            ch:   Índice de canal.
-            dest: Destino (nodeId) o None para broadcast.
-            ack:  Si True, solicita acuse de recibo.
+            ch: Índice de canal Meshtastic.
+            dest: NodeId destino o ``None`` para broadcast.
+            ack: Si True, solicita acuse de recibo cuando la firma lo soporte.
 
         Raises:
             RuntimeError: Si la interfaz no está conectada o el envío falla.
@@ -1167,14 +1175,27 @@ class _NodeManagerBase(abc.ABC):
         iface = self._iface
         if iface is None:
             raise RuntimeError("interface not connected")
+
         sent_ok = False
         last_err: Exception | None = None
-        for kwargs in [
-            dict(text=text, destinationId=dest, channelIndex=ch, wantAck=ack),
-            dict(text=text, destinationId=dest, channelIndex=ch),
-            dict(text=text, destinationId=dest, channel=ch, wantAck=ack),
-            dict(text=text, destinationId=dest, channel=ch),
-        ]:
+
+        if dest is not None and str(dest).strip():
+            clean_dest = str(dest).strip()
+            variants = [
+                {"text": text, "destinationId": clean_dest, "channelIndex": ch, "wantAck": ack},
+                {"text": text, "destinationId": clean_dest, "channelIndex": ch},
+                {"text": text, "destinationId": clean_dest, "channel": ch, "wantAck": ack},
+                {"text": text, "destinationId": clean_dest, "channel": ch},
+            ]
+        else:
+            variants = [
+                {"text": text, "channelIndex": ch, "wantAck": ack},
+                {"text": text, "channelIndex": ch},
+                {"text": text, "channel": ch, "wantAck": ack},
+                {"text": text, "channel": ch},
+            ]
+
+        for kwargs in variants:
             try:
                 iface.sendText(**kwargs)
                 sent_ok = True
@@ -1185,12 +1206,20 @@ class _NodeManagerBase(abc.ABC):
             except Exception as exc:
                 last_err = exc
                 break
+
         if not sent_ok:
             raise RuntimeError(f"sendText failed: {last_err}")
+
         self._emit_event({
-            "type": "tx", "source": "broker", "portnum": "TEXT_MESSAGE_APP",
-            "node_id": self.nd.node_id, "alias": self.nd.alias,
-            "channel": ch, "destination": dest, "require_ack": ack, "text": text,
+            "type": "tx",
+            "source": "broker",
+            "portnum": "TEXT_MESSAGE_APP",
+            "node_id": self.nd.node_id,
+            "alias": self.nd.alias,
+            "channel": ch,
+            "destination": dest,
+            "require_ack": ack,
+            "text": text,
         })
 
     def _on_receive(self, packet=None, interface=None, topic=None, **kwargs) -> None:
@@ -1378,11 +1407,15 @@ class MeshtasticSerialManager(_NodeManagerBase):
 
 class MeshtasticTcpManager(_NodeManagerBase):
     """
-    Manager de nodo Meshtastic por TCP.
+     Manager de nodo Meshtastic por TCP.
 
     Usa TCPInterface del SDK Meshtastic. No hay UsbPortLock.
-    El healthcheck detecta silencio excesivo como señal de enlace muerto
-    (TCP puede perder la conexión sin error explícito).
+
+    Política de estabilidad 24x7:
+        - Mantener la sesión TCP mientras la interfaz siga viva.
+        - Reconectar solo si la interfaz cae realmente o el SDK rompe
+          la conexión.
+        - No usar la ausencia de tráfico como criterio único de caída.
 
     Args:
         nd:  NodeDescriptor con node_type=meshtastic_tcp.
@@ -1456,33 +1489,24 @@ class MeshtasticTcpManager(_NodeManagerBase):
             self.state.set_usb_lock_acquired(False)
 
     def _healthcheck_link_once(self) -> None:
-        """
-        Verifica salud del enlace TCP por silencio excesivo.
+        """Verifica salud del enlace Meshtastic TCP sin reconectar por silencio.
 
-        TCP puede perder la conexión sin error explícito; el silencio
-        prolongado es la señal principal de enlace muerto.
+        Política:
+            - Si la interfaz TCP desaparece estando marcada como conectada,
+              se considera enlace perdido.
+            - Si la interfaz sigue viva, no se fuerza reconexión por ausencia
+              de tráfico. En TCP la inactividad no implica caída real.
         """
         now = now_ts()
         if (now - self._last_link_check_ts) < max(0.2, self.nd.link_check_interval_sec):
             return
+
         self._last_link_check_ts = now
         snap = self.state.snapshot()
+
         if snap.get("connected") and self._iface is None:
             self._mark_link_lost("tcp interface dropped unexpectedly")
-            return
-        sl = max(10.0, self.nd.tcp_dead_silence_sec)
-        lpt = snap.get("last_packet_ts")
-        if snap.get("connected") and self._iface is not None and lpt:
-            try:
-                silence = now - float(lpt)
-            except Exception:
-                silence = 0.0
-            if silence >= sl:
-                self._mark_link_lost(
-                    f"tcp silent {silence:.0f}s > {sl:.0f}s "
-                    f"({self.nd.tcp_host}:{self.nd.tcp_port})"
-                )
-
+            return  
 
 # ======================================================================================
 # MeshCore Serial (nodo de primer nivel)
@@ -1625,6 +1649,124 @@ class MeshCoreSerialManager(_NodeManagerBase):
         self.state.set_status("stopping")
         self._iface = None
 
+    def enqueue_send(self, item: dict) -> dict:
+        """
+        Inserta un mensaje en la cola persistente de salida MeshCore.
+
+        En MeshCore no se usa el bucle `_run()` del manager base, sino un hilo
+        asyncio propio. Por ello, los mensajes deben almacenarse en `_sendq`
+        y ser volcados explícitamente a `_async_tx_q` cuando la sesión está
+        conectada.
+
+        Args:
+            item: Dict con 'text', 'ch', 'dest', 'ack'.
+
+        Returns:
+            Dict con 'ok' y opcionalmente 'error' o 'queued'.
+        """
+        text = sanitize_text(str(item.get("text") or ""))
+        if not text:
+            return {"ok": False, "error": "empty text"}
+
+        if self.nd.tx_block_during_cooldown:
+            ok, reason = self.can_tx_now()
+            if not ok and self._iface is not None:
+                return {"ok": False, "error": reason}
+
+        try:
+            self._sendq.put_nowait({
+                "text": text,
+                "ch":   safe_int(item.get("ch", 0), 0),
+                "dest": item.get("dest") or None,
+                "ack":  bool(item.get("ack", False)),
+            })
+            self.state.set_sendq_size(self._sendq.qsize())
+            return {"ok": True, "queued": True}
+        except queue.Full:
+            return {"ok": False, "error": "send queue full"}
+
+
+    def _flush_pending_sendq_to_async(self, limit: int = 32) -> None:
+        """
+        Vuelca mensajes pendientes de `_sendq` a la cola asyncio `_async_tx_q`.
+
+        Este paso es obligatorio en MeshCore porque el manager no ejecuta
+        `_NodeManagerBase._run()`, por lo que `_drain_sendq_once()` nunca llega
+        a llamar a `_do_send()`.
+
+        Lógica de radio/MeshCore aplicada:
+            - Si existe mapeo explícito en ``mc_channel_map`` para ``ch``, se usa.
+            - Si no existe mapeo y ``dest`` tiene valor, se usa envío a contacto.
+            - Si no existe mapeo ni destino, se usa ``ch`` como ``channel_idx``
+            nativo de MeshCore.
+            - Se antepone ``[MT]`` a los mensajes que salen desde el lado
+            Meshtastic hacia MeshCore, evitando duplicarlo si ya está presente.
+
+        Args:
+            limit: Número máximo de mensajes a mover por iteración.
+
+        Raises:
+            RuntimeError: Si el loop/cola async no están listos o el volcado falla.
+        """
+        if self._async_loop is None or self._async_tx_q is None:
+            return
+
+        moved = 0
+        max_items = max(1, int(limit))
+
+        while moved < max_items:
+            try:
+                item = self._sendq.get_nowait()
+            except queue.Empty:
+                self.state.set_sendq_size(self._sendq.qsize())
+                return
+
+            self.state.set_sendq_size(self._sendq.qsize())
+
+            text = sanitize_text(str(item.get("text") or ""))
+            ch = safe_int(item.get("ch", 0), 0)
+            dest = item.get("dest") or None
+
+            if not text:
+                continue
+
+            clean_text = text
+            if not clean_text.startswith("[MT]"):
+                clean_text = f"[MT] {clean_text}"
+
+            mapping = self._channel_map.get(ch)
+            if mapping:
+                target: dict | str = mapping
+            elif dest:
+                target = str(dest).strip()
+            else:
+                # Fallback correcto: usar el canal de la ruta como channel_idx nativo
+                target = {"kind": "chan", "target": int(ch)}
+
+            try:
+                self._async_loop.call_soon_threadsafe(
+                    self._async_tx_q.put_nowait,
+                    (target, clean_text),
+                )
+                moved += 1
+                self._emit_event({
+                    "type": "tx",
+                    "source": "broker",
+                    "portnum": "TEXT_MESSAGE_APP",
+                    "node_id": self.nd.node_id,
+                    "alias": self.nd.alias,
+                    "channel": ch,
+                    "destination": dest,
+                    "text": clean_text,
+                })
+            except Exception as exc:
+                try:
+                    self._sendq.put_nowait(item)
+                except queue.Full:
+                    pass
+                self.state.set_sendq_size(self._sendq.qsize())
+                raise RuntimeError(f"meshcore flush enqueue error: {exc}")
+
     def _async_runner(self) -> None:
         """Punto de entrada del hilo asyncio."""
         loop = asyncio.new_event_loop()
@@ -1651,9 +1793,57 @@ class MeshCoreSerialManager(_NodeManagerBase):
                 await asyncio.sleep(backoff)
                 backoff = min(120.0, backoff * 1.8)
 
+    async def _meshcore_disconnect_clean(self) -> None:
+        """Cierra una sesión MeshCore de forma segura para uso 24x7.
+
+        Esta rutina evita dejar tareas asyncio internas de meshcore pendientes
+        al reconectar o detener la sesión. Es idempotente: si no hay engine
+        activo, no hace nada.
+
+        Lógica:
+            1. Desvincula primero las referencias locales (_engine, _iface).
+            2. Intenta desconectar el engine si existe.
+            3. Cede control al loop para que las cancelaciones internas se drenen.
+            4. No propaga excepciones de cierre para no romper el supervisor.
+
+        Returns:
+            None.
+        """
+        engine = self._engine
+        self._engine = None
+        self._iface = None
+        self._connect_started_ts = None
+
+        if engine is None:
+            return
+
+        try:
+            await engine.disconnect()
+        except Exception as exc:
+            log(
+                f"{self.log_tag}[{self.nd.alias}] "
+                f"disconnect warning: {type(exc).__name__}: {exc}"
+            )
+
+        try:
+            # Dar una oportunidad al loop para drenar tareas internas canceladas.
+            await asyncio.sleep(0.20)
+        except Exception:
+            pass   
+
     async def _session_once(self) -> None:
         """
         Abre sesión MeshCore, suscribe eventos y procesa cola TX.
+
+        Lógica de radio/MeshCore aplicada:
+            - RX canal MeshCore -> broker:
+                1. intenta traducir channel_idx usando mc_chanidx_to_ch
+                2. si no existe mapeo, usa channel_idx nativo
+                3. si es contacto directo, usa mc_contact_to_ch
+                4. si no hay resolución, usa mc_default_ch
+            - TX broker -> MeshCore:
+                la cola persistente se vuelca con _flush_pending_sendq_to_async(),
+                que resuelve mc_channel_map o usa channel_idx nativo del canal de ruta.
 
         Raises:
             RuntimeError: Si la librería no está disponible o la conexión falla.
@@ -1662,14 +1852,21 @@ class MeshCoreSerialManager(_NodeManagerBase):
         log(f"{self.log_tag}[{self.nd.alias}] conectando -> {port} @ {baud}")
         engine = await self._MeshCore.create_serial(port, baud, debug=False)  # type: ignore
         self._engine = engine
-        self._iface  = engine  # señal "conectado" para can_tx_now
+        self._iface = engine
         self._connect_started_ts = now_ts()
         self.state.set_connected(True)
         self.state.set_status("running")
         log(f"{self.log_tag}[{self.nd.alias}] conectado a {port}")
-        self._emit_event({"type": "status", "subtype": "connected", "source": "meshcore",
-                          "conn_mode": "serial", "portnum": "BROKER_STATUS", "mc_port": port})
+        self._emit_event({
+            "type": "status",
+            "subtype": "connected",
+            "source": "meshcore",
+            "conn_mode": "serial",
+            "portnum": "BROKER_STATUS",
+            "mc_port": port,
+        })
         last_rx_ts = now_ts()
+
         try:
             await engine.start_auto_message_fetching()
         except Exception:
@@ -1679,42 +1876,66 @@ class MeshCoreSerialManager(_NodeManagerBase):
             nonlocal last_rx_ts
             try:
                 last_rx_ts = now_ts()
-                payload  = dict(getattr(event, "payload", None) or {})
-                ev_type  = getattr(event, "type", None)
-                kind     = "chan" if ev_type == self._EventType.CHANNEL_MSG_RECV else "contact"
-                text     = sanitize_text(str(payload.get("text") or ""))
+                payload = dict(getattr(event, "payload", None) or {})
+                ev_type = getattr(event, "type", None)
+                kind = "chan" if ev_type == self._EventType.CHANNEL_MSG_RECV else "contact"
+                text = sanitize_text(str(payload.get("text") or ""))
                 if not text:
                     return
-                prefix   = str(payload.get("pubkey_prefix") or "").strip()
-                alias    = str(payload.get("alias") or payload.get("name")
-                               or self._aliases.get(prefix) or "").strip()
-                chan_idx  = payload.get("channel_idx")
-                out_ch   = None
+
+                prefix = str(payload.get("pubkey_prefix") or "").strip()
+                alias = str(
+                    payload.get("alias")
+                    or payload.get("name")
+                    or self._aliases.get(prefix)
+                    or ""
+                ).strip()
+
+                chan_idx = payload.get("channel_idx")
+                out_ch = None
+
                 if kind == "chan" and chan_idx is not None:
                     try:
-                        out_ch = self._chanidx_to_ch.get(int(chan_idx))
+                        chan_idx_i = int(chan_idx)
+                        # 1) traducción explícita si existe
+                        out_ch = self._chanidx_to_ch.get(chan_idx_i)
+                        # 2) fallback a channel_idx nativo
+                        if out_ch is None:
+                            out_ch = chan_idx_i
                     except Exception:
-                        pass
+                        out_ch = None
+
                 if out_ch is None and prefix:
                     out_ch = self._contact_to_ch.get(prefix)
+
                 if out_ch is None:
                     out_ch = self.nd.mc_default_ch
+
                 head = "[MC]"
                 if self.nd.mc_rx_prefix_style == "alias" and alias:
                     head = f"[MC:{alias}]"
                 elif prefix:
                     head = f"[MC:{prefix}]"
+
                 out_text = f"{head} {text}".strip()
                 fp = f"{out_ch}|{out_text}"
+
                 if self._recent_injected.get(fp, 0) < now_ts():
                     self._recent_injected[fp] = now_ts() + self.nd.mc_inject_dedup_sec
                     record = {
-                        "ts": now_ts(), "iso": iso_now(), "type": "rx",
-                        "source": "meshcore", "portnum": "TEXT_MESSAGE_APP",
-                        "node_id": self.nd.node_id, "alias": self.nd.alias,
-                        "channel": int(out_ch), "text": out_text,
-                        "pubkey_prefix": prefix, "mc_alias": alias or None,
-                        "mc_kind": kind, "channel_idx": chan_idx,
+                        "ts": now_ts(),
+                        "iso": iso_now(),
+                        "type": "rx",
+                        "source": "meshcore",
+                        "portnum": "TEXT_MESSAGE_APP",
+                        "node_id": self.nd.node_id,
+                        "alias": self.nd.alias,
+                        "channel": int(out_ch),
+                        "text": out_text,
+                        "pubkey_prefix": prefix,
+                        "mc_alias": alias or None,
+                        "mc_kind": kind,
+                        "channel_idx": chan_idx,
                     }
                     self.state.note_packet()
                     self._emit_event(record)
@@ -1736,10 +1957,14 @@ class MeshCoreSerialManager(_NodeManagerBase):
             silence = now_ts() - last_rx_ts
             if self.nd.mc_silence_reconnect_sec > 0 and silence > float(self.nd.mc_silence_reconnect_sec):
                 raise RuntimeError(f"meshcore silent > {self.nd.mc_silence_reconnect_sec}s")
+
+            self._flush_pending_sendq_to_async()
+
             try:
                 target, text = await asyncio.wait_for(self._async_tx_q.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
+
             for part in self._split_utf8(text, self.nd.mc_max_text_bytes):
                 if isinstance(target, dict) and str(target.get("kind")) == "chan":
                     await engine.commands.send_chan_msg(int(target["target"]), part)
@@ -1753,52 +1978,79 @@ class MeshCoreSerialManager(_NodeManagerBase):
                         except Exception:
                             pass
                     await engine.commands.send_msg(send_target, part)
+
                 last_rx_ts = now_ts()
                 await asyncio.sleep(0.15)
-        try:
-            await engine.disconnect()
-        except Exception:
-            pass
-        self._iface = None
+
+        await self._meshcore_disconnect_clean()
         self.state.set_connected(False, "stopped")
 
+
     def _do_send(self, *, text: str, ch: int, dest: str | None, ack: bool) -> None:
-        """
-        Encola un mensaje para envío por MeshCore vía asyncio.
+            """
+            Encola un mensaje para envío por MeshCore vía asyncio.
 
-        Sobreescribe _NodeManagerBase._do_send porque MeshCore usa asyncio
-        en lugar de la API síncrona sendText de Meshtastic.
+            Sobreescribe _NodeManagerBase._do_send porque MeshCore usa asyncio
+            en lugar de la API síncrona sendText de Meshtastic.
 
-        El canal Meshtastic ch se mapea a canal/contacto MeshCore usando
-        _channel_map del NodeDescriptor.
+            Lógica de radio/MeshCore aplicada:
+                - Si el tráfico sale desde el lado Meshtastic hacia MeshCore,
+                se antepone el prefijo "[MT] " para identificar el origen.
+                - Si el texto ya viene prefijado con "[MT]", no se duplica.
+                - Si existe mapeo explícito en ``_channel_map`` para ``ch``, se usa.
+                - Si no hay mapeo y ``dest`` está informado, se usa envío dirigido
+                a contacto MeshCore.
+                - Si no hay mapeo ni destino, se usa directamente ``ch`` como
+                ``channel_idx`` nativo de MeshCore.
 
-        Args:
-            text: Texto a enviar.
-            ch:   Canal Meshtastic (se mapea según mc_channel_map).
-            dest: Destino (prefix de contacto MeshCore) o None para canal.
-            ack:  No usado en MeshCore SDK.
+            Args:
+                text: Texto a enviar.
+                ch: Canal lógico/broker o channel_idx nativo según configuración.
+                dest: Destino MeshCore (prefijo de contacto) o None para canal.
+                ack: No usado en MeshCore SDK; se mantiene por compatibilidad de firma.
 
-        Raises:
-            RuntimeError: Si el loop asyncio no está disponible.
-        """
-        if not self._async_loop or not self._async_tx_q:
-            raise RuntimeError("meshcore loop not ready")
-        mapping = self._channel_map.get(ch)
-        if mapping:
-            target: dict | str = mapping
-        elif dest:
-            target = str(dest).strip()
-        else:
-            target = {"kind": "chan", "target": self.nd.mc_default_ch}
-        try:
-            self._async_loop.call_soon_threadsafe(self._async_tx_q.put_nowait, (target, text))
-        except Exception as exc:
-            raise RuntimeError(f"meshcore enqueue error: {exc}")
-        self._emit_event({
-            "type": "tx", "source": "broker", "portnum": "TEXT_MESSAGE_APP",
-            "node_id": self.nd.node_id, "alias": self.nd.alias,
-            "channel": ch, "destination": dest, "text": text,
-        })
+            Raises:
+                RuntimeError: Si el loop asyncio no está disponible o falla la cola.
+            """
+            if not self._async_loop or not self._async_tx_q:
+                raise RuntimeError("meshcore loop not ready")
+
+            clean_text = sanitize_text(str(text or ""))
+            if not clean_text:
+                raise RuntimeError("empty text")
+
+            # Prefijo de origen Meshtastic -> MeshCore
+            if not clean_text.startswith("[MT]"):
+                clean_text = f"[MT] {clean_text}"
+
+            mapping = self._channel_map.get(ch)
+            if mapping:
+                target: dict | str = mapping
+            elif dest:
+                target = str(dest).strip()
+            else:
+                # Modo nativo MeshCore: si no hay mapeo, usar directamente el canal de ruta
+                target = {"kind": "chan", "target": int(ch)}
+
+            try:
+                self._async_loop.call_soon_threadsafe(
+                    self._async_tx_q.put_nowait,
+                    (target, clean_text),
+                )
+            except Exception as exc:
+                raise RuntimeError(f"meshcore enqueue error: {exc}")
+
+            self._emit_event({
+                "type": "tx",
+                "source": "broker",
+                "portnum": "TEXT_MESSAGE_APP",
+                "node_id": self.nd.node_id,
+                "alias": self.nd.alias,
+                "channel": ch,
+                "destination": dest,
+                "text": clean_text,
+            })
+    
 
     # Los métodos abstractos no se usan en MeshCore (ciclo asyncio propio)
     def _connect_once(self) -> None: pass
@@ -1853,13 +2105,16 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
     """
     Manager de nodo MeshCore por TCP.
 
-    Hereda íntegramente de MeshCoreSerialManager: reutiliza el ciclo asyncio,
-    la lógica de routing de canales, _do_send, _split_utf8 y el manejo de
-    eventos RX. La única diferencia es el método de apertura de sesión:
+    Hereda de MeshCoreSerialManager y reutiliza el ciclo asyncio, la lógica
+    de routing de canales, _do_send, _split_utf8 y el manejo de eventos RX.
+    La diferencia principal es el método de apertura de sesión:
     usa ``MeshCore.create_tcp(host, port)`` en lugar de ``create_serial``.
 
-    El healthcheck de silencio es más agresivo que en serial porque TCP puede
-    perder la conexión sin error explícito (partición de red, nodo apagado).
+    Política de estabilidad 24x7:
+        - Mantener la sesión TCP mientras el engine siga operativo.
+        - Reconectar solo ante error real de conexión, suscripción,
+          envío o caída efectiva de la sesión.
+        - No usar la ausencia de tráfico RX como criterio único de reconexión.
 
     Según la API oficial de meshcore_py:
         engine = await MeshCore.create_tcp("192.168.1.100", 4000)
@@ -1886,13 +2141,13 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
             )
 
     async def _session_once(self) -> None:
-        """
-        Abre sesión MeshCore por TCP, suscribe eventos y procesa cola TX.
+        """Abre sesión MeshCore por TCP, suscribe eventos y procesa cola TX.
 
-        Sobreescribe MeshCoreSerialManager._session_once sustituyendo
-        ``create_serial(port, baud)`` por ``create_tcp(host, port)``.
-        El resto del ciclo (suscripción a eventos, cola TX, watchdog de
-        silencio) es idéntico al manager serial y se hereda sin cambios.
+        Política de estabilidad 24x7:
+            - Mantener la sesión TCP mientras siga operativa.
+            - Reconectar solo ante error real de create_tcp(), subscribe(),
+              send_chan_msg(), send_msg() o cierre/caída efectiva del engine.
+            - No usar el silencio RX como criterio único de desconexión.
 
         Raises:
             ValueError:   Si mc_tcp_host está vacío.
@@ -1900,65 +2155,92 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
         """
         if not self._available:
             raise RuntimeError(f"meshcore no disponible: {self._import_error}")
+
         host = self.nd.mc_tcp_host
         port = self.nd.mc_tcp_port
+
         log(f"{self.log_tag}[{self.nd.alias}] conectando -> {host}:{port}")
         engine = await self._MeshCore.create_tcp(host, port)  # type: ignore
+
         self._engine = engine
-        self._iface  = engine
+        self._iface = engine
         self._connect_started_ts = now_ts()
         self.state.set_connected(True)
         self.state.set_status("running")
+
         log(f"{self.log_tag}[{self.nd.alias}] conectado a {host}:{port}")
-        self._emit_event({"type": "status", "subtype": "connected", "source": "meshcore",
-                          "conn_mode": "tcp", "portnum": "BROKER_STATUS",
-                          "mc_host": host, "mc_port": port})
-        last_rx_ts = now_ts()
+        self._emit_event({
+            "type": "status",
+            "subtype": "connected",
+            "source": "meshcore",
+            "conn_mode": "tcp",
+            "portnum": "BROKER_STATUS",
+            "mc_host": host,
+            "mc_port": port,
+        })
+
         try:
             await engine.start_auto_message_fetching()
         except Exception:
             pass
 
         async def _on_mc_msg(event) -> None:
-            nonlocal last_rx_ts
             try:
-                last_rx_ts = now_ts()
-                payload  = dict(getattr(event, "payload", None) or {})
-                ev_type  = getattr(event, "type", None)
-                kind     = "chan" if ev_type == self._EventType.CHANNEL_MSG_RECV else "contact"
-                text     = sanitize_text(str(payload.get("text") or ""))
+                payload = dict(getattr(event, "payload", None) or {})
+                ev_type = getattr(event, "type", None)
+                kind = "chan" if ev_type == self._EventType.CHANNEL_MSG_RECV else "contact"
+                text = sanitize_text(str(payload.get("text") or ""))
                 if not text:
                     return
-                prefix   = str(payload.get("pubkey_prefix") or "").strip()
-                alias    = str(payload.get("alias") or payload.get("name")
-                               or self._aliases.get(prefix) or "").strip()
-                chan_idx  = payload.get("channel_idx")
-                out_ch   = None
+
+                prefix = str(payload.get("pubkey_prefix") or "").strip()
+                alias = str(
+                    payload.get("alias")
+                    or payload.get("name")
+                    or self._aliases.get(prefix)
+                    or ""
+                ).strip()
+
+                chan_idx = payload.get("channel_idx")
+                out_ch = None
+
                 if kind == "chan" and chan_idx is not None:
                     try:
                         out_ch = self._chanidx_to_ch.get(int(chan_idx))
                     except Exception:
                         pass
+
                 if out_ch is None and prefix:
                     out_ch = self._contact_to_ch.get(prefix)
+
                 if out_ch is None:
                     out_ch = self.nd.mc_default_ch
+
                 head = "[MC]"
                 if self.nd.mc_rx_prefix_style == "alias" and alias:
                     head = f"[MC:{alias}]"
                 elif prefix:
                     head = f"[MC:{prefix}]"
+
                 out_text = f"{head} {text}".strip()
                 fp = f"{out_ch}|{out_text}"
+
                 if self._recent_injected.get(fp, 0) < now_ts():
                     self._recent_injected[fp] = now_ts() + self.nd.mc_inject_dedup_sec
                     record = {
-                        "ts": now_ts(), "iso": iso_now(), "type": "rx",
-                        "source": "meshcore", "portnum": "TEXT_MESSAGE_APP",
-                        "node_id": self.nd.node_id, "alias": self.nd.alias,
-                        "channel": int(out_ch), "text": out_text,
-                        "pubkey_prefix": prefix, "mc_alias": alias or None,
-                        "mc_kind": kind, "channel_idx": chan_idx,
+                        "ts": now_ts(),
+                        "iso": iso_now(),
+                        "type": "rx",
+                        "source": "meshcore",
+                        "portnum": "TEXT_MESSAGE_APP",
+                        "node_id": self.nd.node_id,
+                        "alias": self.nd.alias,
+                        "channel": int(out_ch),
+                        "text": out_text,
+                        "pubkey_prefix": prefix,
+                        "mc_alias": alias or None,
+                        "mc_kind": kind,
+                        "channel_idx": chan_idx,
                     }
                     self.state.note_packet()
                     self._emit_event(record)
@@ -1967,6 +2249,7 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
                             self.on_text_event(record)
                         except Exception as exc:
                             log(f"{self.log_tag}[{self.nd.alias}] on_text_event error: {exc}")
+
             except Exception as exc:
                 log(f"{self.log_tag}[{self.nd.alias}] rx error: {exc}")
 
@@ -1974,48 +2257,45 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
             engine.subscribe(self._EventType.CONTACT_MSG_RECV, _on_mc_msg)
             engine.subscribe(self._EventType.CHANNEL_MSG_RECV, _on_mc_msg)
         except Exception as exc:
+            await self._meshcore_disconnect_clean()
             raise RuntimeError(f"meshcore tcp subscribe failed: {exc}")
 
-        # TCP: vigilar silencio más agresivamente que serial.
-        # Si mc_tcp_dead_silence_sec está configurado Y es menor que
-        # mc_silence_reconnect_sec, usamos el valor TCP como límite efectivo.
-        silence_limit = float(self.nd.mc_tcp_dead_silence_sec)
-        fallback_limit = float(self.nd.mc_silence_reconnect_sec)
-        effective_silence = min(silence_limit, fallback_limit) if silence_limit > 0 else fallback_limit
-
-        while not self._stop.is_set():
-            silence = now_ts() - last_rx_ts
-            if effective_silence > 0 and silence > effective_silence:
-                raise RuntimeError(
-                    f"meshcore tcp silent {silence:.0f}s > {effective_silence:.0f}s "
-                    f"({host}:{port})"
-                )
-            try:
-                target, text = await asyncio.wait_for(self._async_tx_q.get(), timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
-            for part in self._split_utf8(text, self.nd.mc_max_text_bytes):
-                if isinstance(target, dict) and str(target.get("kind")) == "chan":
-                    await engine.commands.send_chan_msg(int(target["target"]), part)
-                else:
-                    send_target = target
-                    if isinstance(send_target, str):
-                        try:
-                            c = engine.get_contact_by_key_prefix(send_target)
-                            if c:
-                                send_target = c
-                        except Exception:
-                            pass
-                    await engine.commands.send_msg(send_target, part)
-                last_rx_ts = now_ts()
-                await asyncio.sleep(0.15)
         try:
-            await engine.disconnect()
-        except Exception:
-            pass
-        self._iface = None
-        self.state.set_connected(False, "stopped")
+            while not self._stop.is_set():
+                if self._engine is None or self._iface is None:
+                    raise RuntimeError(f"meshcore tcp session dropped ({host}:{port})")
+                 
+                self._flush_pending_sendq_to_async()
+                
+                try:
+                    target, text = await asyncio.wait_for(self._async_tx_q.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
 
+                for part in self._split_utf8(text, self.nd.mc_max_text_bytes):
+                    try:
+                        if isinstance(target, dict) and str(target.get("kind")) == "chan":
+                            await engine.commands.send_chan_msg(int(target["target"]), part)
+                        else:
+                            send_target = target
+                            if isinstance(send_target, str):
+                                try:
+                                    c = engine.get_contact_by_key_prefix(send_target)
+                                    if c:
+                                        send_target = c
+                                except Exception:
+                                    pass
+                            await engine.commands.send_msg(send_target, part)
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"meshcore tcp tx failed ({host}:{port}): "
+                            f"{type(exc).__name__}: {exc}"
+                        ) from exc
+
+                    await asyncio.sleep(0.15)
+        finally:
+            await self._meshcore_disconnect_clean()
+            self.state.set_connected(False, "stopped")
 
 # ======================================================================================
 # Fábrica de managers

@@ -34,6 +34,8 @@ Esta condición forma parte de la licencia MIT utilizada en este repositorio.
 
 📘 **[Abrir guía completa (.pdf) → Escenarios_nodos.pdf](./Documentos/Escenarios_nodos.pdf)**
 
+📘 **[Mapeo de canales (.pdf) → Mapeado_Canales.md](./Documentos/Mapeado_Canales.md)**
+
 ---
 
 
@@ -757,7 +759,7 @@ El watchdog se ejecuta cada 60 segundos mediante un timer systemd y realiza las 
 4. **Si socat fue reiniciado**, reinicia también el broker para limpiar descriptores de fichero.
 5. **Broker activo**. Si está caído, lo levanta.
 6. **USB de MeshCore presente** (si `MESHCORE_ENABLE=1`). Si desaparece, reinicia el broker.
-7. **Anti-zombie**: lee `broker_status.json` y reinicia si no ha habido tráfico en 60 segundos.
+7. **Validación del estado lógico**: lee `broker_status.json` y reinicia solo si el fichero está ausente, corrupto o contiene un estado inválido. No reinicia por simple ausencia de tráfico, ya que un nodo TCP puede permanecer sano aunque no haya mensajes durante largos intervalos.
 
 ```ini
 # minibroker-usb-watchdog.timer
@@ -838,6 +840,9 @@ sudo journalctl -u direwolf -f
 ---
 
 ## 8. Casos de uso y flujo de mensajes
+
+### Caso 0. Inclusión de canales en la pasarela y modo de funcinamiento.
+
 
 ### Caso 1 — Nodo A ↔ Nodo B, sin pasarela APRS
 
