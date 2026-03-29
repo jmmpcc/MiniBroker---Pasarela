@@ -83,6 +83,16 @@ def safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return truthy(value, default)
+    return default
+
+
 def json_default(value: Any) -> Any:
     if isinstance(value, (bytes, bytearray)):
         return value.hex()
@@ -2632,19 +2642,19 @@ class ControlServer:
             return {"ok": True, "cmd": cmd, "data": data}
 
         if cmd == "SEND_TEXT":
-            text    = str(params.get("text") or "")
+            text    = sanitize_text(str(params.get("text") or ""))
             ch      = safe_int(params.get("ch", 0), 0)
             dest    = params.get("dest") or None
-            ack     = bool(params.get("ack", False))
+            ack     = safe_bool(params.get("ack", False), False)
             node_id = params.get("node_id") or params.get("alias") or None
             result  = self.node_mgr.enqueue_send(node_id, {"text": text, "ch": ch, "dest": dest, "ack": ack})
             return {"cmd": cmd, **result}
 
         if cmd == "BROADCAST_TEXT":
-            text   = str(params.get("text") or "")
+            text   = sanitize_text(str(params.get("text") or ""))
             ch     = safe_int(params.get("ch", 0), 0)
             dest   = params.get("dest") or None
-            ack    = bool(params.get("ack", False))
+            ack    = safe_bool(params.get("ack", False), False)
             result = self.node_mgr.broadcast_send({"text": text, "ch": ch, "dest": dest, "ack": ack})
             return {"cmd": cmd, **result}
 
