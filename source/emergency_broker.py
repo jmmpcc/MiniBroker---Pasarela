@@ -441,15 +441,31 @@ class BrokerConfig:
 class JsonlJournal:
     """Escritor JSONL thread-safe con soporte de backlog filtrable por node_id."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, max_bytes: int = 4 * 1024 * 1024):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._max_bytes = int(max_bytes)
+
+    def _rotate_if_needed(self) -> None:
+        """Rota el fichero si supera _max_bytes. Llamar bajo self._lock."""
+        try:
+            if self._max_bytes <= 0 or not self.path.exists():
+                return
+            if self.path.stat().st_size < self._max_bytes:
+                return
+            rotated = self.path.with_suffix(self.path.suffix + ".1")
+            if rotated.exists():
+                rotated.unlink()
+            self.path.replace(rotated)
+        except Exception:
+            pass
 
     def append(self, record: dict) -> None:
         """Serializa y escribe un registro JSONL en disco de forma atómica."""
         line = json.dumps(record, ensure_ascii=False, default=json_default)
         with self._lock:
+            self._rotate_if_needed()
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
 
@@ -800,12 +816,12 @@ class BrokerState:
         }
 
     def persist(self, cfg: BrokerConfig) -> None:
-        """Escribe broker_status.json con el snapshot global."""
+        """Escribe broker_status.json con el snapshot global (escritura atómica)."""
         try:
-            cfg.runtime_status.write_text(
-                json.dumps(self.snapshot(), ensure_ascii=False, indent=2, default=json_default),
-                encoding="utf-8",
-            )
+            content = json.dumps(self.snapshot(), ensure_ascii=False, indent=2, default=json_default)
+            tmp = cfg.runtime_status.with_suffix(".tmp")
+            tmp.write_text(content, encoding="utf-8")
+            tmp.replace(cfg.runtime_status)
         except Exception:
             pass
 
@@ -1132,6 +1148,9 @@ class _NodeManagerBase(abc.ABC):
 
     def _drain_sendq_once(self) -> None:
         """Extrae un mensaje de la cola y lo envía."""
+        # Comprobar cooldown ANTES de extraer para no perder el mensaje
+        if self.nd.tx_block_during_cooldown and self.state.cooldown_remaining() > 0:
+            return
         try:
             item = self._sendq.get_nowait()
         except queue.Empty:
@@ -1144,8 +1163,6 @@ class _NodeManagerBase(abc.ABC):
         ack  = bool(item.get("ack", False))
         if not text:
             return
-        if self.nd.tx_block_during_cooldown and self.state.cooldown_remaining() > 0:
-            raise RuntimeError("tx blocked by cooldown")
         self._do_send(text=text, ch=ch, dest=dest, ack=ack)
     
     def _do_send(self, *, text: str, ch: int, dest: str | None, ack: bool) -> None:
@@ -1235,6 +1252,10 @@ class _NodeManagerBase(abc.ABC):
             topic:     Topic pubsub.
             **kwargs:  Parámetros adicionales del bus pubsub.
         """
+        # Filtrar paquetes de otras interfaces cuando hay varios nodos Meshtastic activos.
+        # El bus pubsub es global: sin este filtro, cada manager procesa paquetes ajenos.
+        if interface is not None and interface is not self._iface:
+            return
         obj = packet if isinstance(packet, dict) else kwargs.get("packet")
         if not isinstance(obj, dict):
             obj = {}
@@ -1791,7 +1812,7 @@ class MeshCoreSerialManager(_NodeManagerBase):
                 self.state.set_connected(False, err)
                 log(f"{self.log_tag}[{self.nd.alias}] error: {err}")
                 await asyncio.sleep(backoff)
-                backoff = min(120.0, backoff * 1.8)
+                backoff = min(self.nd.reconnect_max_sec, backoff * 1.8)
 
     async def _meshcore_disconnect_clean(self) -> None:
         """Cierra una sesión MeshCore de forma segura para uso 24x7.
@@ -1922,6 +1943,9 @@ class MeshCoreSerialManager(_NodeManagerBase):
 
                 if self._recent_injected.get(fp, 0) < now_ts():
                     self._recent_injected[fp] = now_ts() + self.nd.mc_inject_dedup_sec
+                    _now = now_ts()
+                    for _k in [k for k, exp in self._recent_injected.items() if exp < _now]:
+                        self._recent_injected.pop(_k, None)
                     record = {
                         "ts": now_ts(),
                         "iso": iso_now(),
@@ -2227,6 +2251,9 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
 
                 if self._recent_injected.get(fp, 0) < now_ts():
                     self._recent_injected[fp] = now_ts() + self.nd.mc_inject_dedup_sec
+                    _now = now_ts()
+                    for _k in [k for k, exp in self._recent_injected.items() if exp < _now]:
+                        self._recent_injected.pop(_k, None)
                     record = {
                         "ts": now_ts(),
                         "iso": iso_now(),

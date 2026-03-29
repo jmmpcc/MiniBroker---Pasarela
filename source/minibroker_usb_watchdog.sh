@@ -76,10 +76,16 @@ if [ ! -e "$USB_VIRTUAL" ]; then
     exit 1
 fi
 
+APRS_SERVICE="minibroker-aprs.service"
+
 # 5) Si socat fue rearmado, reiniciar el broker para limpiar descriptores.
 if [ "$need_broker_restart" -eq 1 ]; then
     log "Reiniciando broker: $BROKER_SERVICE"
     /usr/bin/systemctl restart "$BROKER_SERVICE"
+    if [ "$APRS_GATE_ENABLED" = "1" ]; then
+        log "Reiniciando APRS bridge tras rearme de broker: $APRS_SERVICE"
+        /usr/bin/systemctl restart "$APRS_SERVICE" || true
+    fi
     exit 0
 fi
 
@@ -87,6 +93,10 @@ fi
 if ! /usr/bin/systemctl is-active --quiet "$BROKER_SERVICE"; then
     log "Broker inactivo. Reiniciando $BROKER_SERVICE"
     /usr/bin/systemctl restart "$BROKER_SERVICE"
+    if [ "$APRS_GATE_ENABLED" = "1" ]; then
+        log "Reiniciando APRS bridge tras rearme de broker: $APRS_SERVICE"
+        /usr/bin/systemctl restart "$APRS_SERVICE" || true
+    fi
     exit 0
 fi
 
