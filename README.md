@@ -34,7 +34,10 @@ Esta condición forma parte de la licencia MIT utilizada en este repositorio.
 
 📘 **[Abrir guía completa (.pdf) → Escenarios_nodos.pdf](./Documentos/Escenarios_nodos.pdf)**
 
-📘 **[Mapeo de canales (.pdf) → Mapeado_Canales.md](./Documentos/Mapeado_Canales.md)**
+📘 **[Mapeo de canales (.md) → Mapeado_Canales.md](./Documentos/Mapeado_Canales.md)**
+
+📘 ** IMPORTANTE: [Guia MULTI NODO (.md) → Guia_Multi_Nodo.md](./Documentos/Guia_Multi_Nodo.md)**
+
 
 ---
 
