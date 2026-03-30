@@ -574,10 +574,14 @@ class JsonlHub:
 
     def _run(self) -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((self.host, self.port))
-        srv.listen(10)
-        srv.settimeout(1.0)
+        try:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind((self.host, self.port))
+            srv.listen(10)
+            srv.settimeout(1.0)
+        except Exception:
+            srv.close()
+            raise
         self._server = srv
         log(f"[hub] JSONL escuchando en {self.host}:{self.port}")
         while not self._stop.is_set():
@@ -1908,7 +1912,7 @@ class MeshCoreSerialManager(_NodeManagerBase):
                 self.state.set_connected(False, err)
                 log(f"{self.log_tag}[{self.nd.alias}] error: {err}")
                 await asyncio.sleep(backoff)
-                max_backoff = max(float(self.nd.reconnect_min_sec), float(self.nd.reconnect_max_sec))
+                max_backoff = float(self.nd.reconnect_max_sec)
                 backoff = min(max_backoff, backoff * 1.8)
 
     async def _meshcore_disconnect_clean(self) -> None:
@@ -2663,10 +2667,14 @@ class ControlServer:
 
     def _run(self) -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((self.host, self.port))
-        srv.listen(10)
-        srv.settimeout(1.0)
+        try:
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind((self.host, self.port))
+            srv.listen(10)
+            srv.settimeout(1.0)
+        except Exception:
+            srv.close()
+            raise
         self._srv = srv
         log(f"[ctrl] escuchando en {self.host}:{self.port}")
         while not self._stop.is_set():
@@ -2737,8 +2745,11 @@ class ControlServer:
             return snap
 
         if cmd == "NODE_LIST":
-            nodes = [self.node_mgr.get_manager(nid).state.snapshot()
-                     for nid in self.node_mgr.node_ids()]
+            nodes = []
+            for nid in self.node_mgr.node_ids():
+                mgr = self.node_mgr.get_manager(nid)
+                if mgr is not None:
+                    nodes.append(mgr.state.snapshot())
             return {"ok": True, "cmd": cmd, "nodes": nodes}
 
         if cmd == "NODE_STATUS":
