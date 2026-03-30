@@ -1,4 +1,4 @@
-# MiniBroker v1.0.0 — Guía Completa de Instalación y Operación 24/7
+# MiniBroker v4.2 — Guía Completa de Instalación y Operación 24/7
 
 > **Proyecto:** MiniBroker — Broker de mensajería mesh para comunicaciones de emergencia  
 > **Versión documentada:** 1.0.0 multi-nodo  
