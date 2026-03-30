@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Version 2.0 emergency_aprs_bridge -> Pasarela APRS de emergencia para el MiniBroker.
+Version 4.2 emergency_aprs_bridge -> Pasarela APRS de emergencia para el MiniBroker.
 
 Flujo soportado:
 1. Broker JSONL -> APRS RF / APRS-IS
@@ -34,7 +34,7 @@ import threading
 import time
 import unicodedata
 import signal
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -85,24 +85,26 @@ def _print_ts(msg: str) -> None:
 
 @dataclass(slots=True)
 class AprsConfig:
-    broker_host: str = os.getenv("BROKER_HOST", "127.0.0.1")
-    broker_port: int = safe_int(os.getenv("BROKER_PORT", "8765"), 8765)
-    broker_ctrl_host: str = os.getenv("BROKER_CTRL_HOST", "127.0.0.1")
-    broker_ctrl_port: int = safe_int(os.getenv("BROKER_CTRL_PORT", "8766"), 8766)
+    broker_host: str = field(default_factory=lambda: os.getenv("BROKER_HOST", "127.0.0.1"))
+    broker_port: int = field(default_factory=lambda: safe_int(os.getenv("BROKER_PORT", "8765"), 8765))
+    broker_ctrl_host: str = field(default_factory=lambda: os.getenv("BROKER_CTRL_HOST", "127.0.0.1"))
+    broker_ctrl_port: int = field(default_factory=lambda: safe_int(os.getenv("BROKER_CTRL_PORT", "8766"), 8766))
 
-    kiss_host: str = os.getenv("KISS_HOST", "127.0.0.1")
-    kiss_port: int = safe_int(os.getenv("KISS_PORT", "8100"), 8100)
-    kiss_channel: int = safe_int(os.getenv("KISS_CHANNEL", "0"), 0)
-    kiss_txdelay: int = safe_int(os.getenv("KISS_TXDELAY", "30"), 30)
-    kiss_persist: int = safe_int(os.getenv("KISS_PERSIST", "200"), 200)
-    kiss_slottime: int = safe_int(os.getenv("KISS_SLOTTIME", "10"), 10)
-    kiss_txtail: int = safe_int(os.getenv("KISS_TXTAIL", "3"), 3)
+    kiss_host: str = field(default_factory=lambda: os.getenv("KISS_HOST", "127.0.0.1"))
+    kiss_port: int = field(default_factory=lambda: safe_int(os.getenv("KISS_PORT", "8100"), 8100))
+    kiss_channel: int = field(default_factory=lambda: safe_int(os.getenv("KISS_CHANNEL", "0"), 0))
+    kiss_txdelay: int = field(default_factory=lambda: safe_int(os.getenv("KISS_TXDELAY", "30"), 30))
+    kiss_persist: int = field(default_factory=lambda: safe_int(os.getenv("KISS_PERSIST", "200"), 200))
+    kiss_slottime: int = field(default_factory=lambda: safe_int(os.getenv("KISS_SLOTTIME", "10"), 10))
+    kiss_txtail: int = field(default_factory=lambda: safe_int(os.getenv("KISS_TXTAIL", "3"), 3))
 
-    aprs_call: str = (os.getenv("APRS_CALL", "") or "").strip().upper()
-    aprs_path: str = os.getenv("APRS_PATH", "WIDE1-1,WIDE2-1")
-    aprs_msg_max: int = safe_int(os.getenv("APRS_MSG_MAX", "67"), 67)
-    aprs_status_max: int = safe_int(os.getenv("APRS_STATUS_MAX", "67"), 67)
-    aprs_gate_enabled: bool = truthy(os.getenv("APRS_GATE_ENABLED", "1"), True)
+    aprs_call: str = field(default_factory=lambda: (os.getenv("APRS_CALL", "") or "").strip().upper())
+    aprs_path: str = field(default_factory=lambda: os.getenv("APRS_PATH", "WIDE1-1,WIDE2-1"))
+    aprs_msg_max: int = field(default_factory=lambda: safe_int(os.getenv("APRS_MSG_MAX", "67"), 67))
+    aprs_status_max: int = field(default_factory=lambda: safe_int(os.getenv("APRS_STATUS_MAX", "67"), 67))
+    aprs_gate_enabled: bool = field(default_factory=lambda: truthy(os.getenv("APRS_GATE_ENABLED", "1"), True))
+
+
     aprs_allowed_sources: tuple[str, ...] = tuple(
         s.strip().upper() for s in (os.getenv("APRS_ALLOWED_SOURCES", "") or "").split(",") if s.strip()
     )
