@@ -1,7 +1,7 @@
-# MiniBroker v1.0.0 — Guía Completa de Instalación y Operación 24/7
+# MiniBroker v4.2 — Guía Completa de Instalación y Operación 24/7
 
 > **Proyecto:** MiniBroker — Broker de mensajería mesh para comunicaciones de emergencia  
-> **Versión documentada:** 1.0.0 multi-nodo  
+> **Versión documentada:** 4.2.0 multi-nodo  
 > **Tecnologías:** Meshtastic · MeshCore · APRS RF · APRS-IS · Python 3.10+ · systemd  
 > **Audiencia:** Radioaficionados, operadores de emergencias, integradores de red mesh  
 
