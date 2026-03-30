@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Version 4.0 emergency_broker -> MiniBroker multi-nodo: Meshtastic Serial + TCP + MeshCore.
+Version 4.2 emergency_broker -> MiniBroker multi-nodo: Meshtastic Serial + TCP + MeshCore.
 
 Diseño:
 - N nodos activos simultáneamente, cada uno con su propio manager y sendq.
@@ -50,6 +50,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from collections import deque
 
 
 # ======================================================================================
@@ -69,6 +70,22 @@ def now_ts() -> float:
 def iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+def write_text_atomic(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """
+    Escribe texto de forma atómica usando fichero temporal + replace().
+
+    Lógica 24x7:
+        - Evita dejar JSON truncado/corrupto si el proceso muere durante escritura.
+        - replace() en el mismo filesystem es atómico en Linux.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    with tmp.open("w", encoding=encoding) as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp.replace(path)
 
 def truthy(value: str | None, default: bool = False) -> bool:
     if value is None:
@@ -466,13 +483,13 @@ class JsonlJournal:
     def tail(
         self,
         *,
-        limit:    int = 200,
+        limit: int = 200,
         since_ts: float | None = None,
         portnums: Iterable[str] | None = None,
-        node_id:  str | None = None,
+        node_id: str | None = None,
     ) -> list[dict]:
         """
-        Lee el backlog reciente con filtros opcionales.
+        Lee el backlog reciente con filtros opcionales sin cargar todo el fichero en RAM.
 
         Args:
             limit:    Máximo de registros devueltos.
@@ -485,32 +502,37 @@ class JsonlJournal:
         """
         if not self.path.exists():
             return []
+
+        max_items = max(1, int(limit))
         allowed_ports = {str(p).upper() for p in (portnums or []) if str(p).strip()}
-        out: list[dict] = []
+        out: deque[dict] = deque(maxlen=max_items)
+
         with self._lock:
-            lines = self.path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        for raw in reversed(lines):
-            if not raw.strip():
-                continue
-            try:
-                obj = json.loads(raw)
-            except Exception:
-                continue
-            try:
-                ts_f = float(obj.get("ts") or 0)
-            except Exception:
-                ts_f = 0.0
-            if since_ts is not None and ts_f < float(since_ts):
-                continue
-            if allowed_ports and str(obj.get("portnum") or "").upper() not in allowed_ports:
-                continue
-            if node_id and obj.get("node_id") != node_id:
-                continue
-            out.append(obj)
-            if len(out) >= max(1, int(limit)):
-                break
-        out.reverse()
-        return out
+            with self.path.open("r", encoding="utf-8", errors="ignore") as fh:
+                for raw in fh:
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        obj = json.loads(raw)
+                    except Exception:
+                        continue
+
+                    try:
+                        ts_f = float(obj.get("ts") or 0)
+                    except Exception:
+                        ts_f = 0.0
+
+                    if since_ts is not None and ts_f < float(since_ts):
+                        continue
+                    if allowed_ports and str(obj.get("portnum") or "").upper() not in allowed_ports:
+                        continue
+                    if node_id and obj.get("node_id") != node_id:
+                        continue
+
+                    out.append(obj)
+
+        return list(out)
 
 
 class JsonlHub:
@@ -810,12 +832,22 @@ class BrokerState:
         }
 
     def persist(self, cfg: BrokerConfig) -> None:
-        """Escribe broker_status.json con el snapshot global."""
+        """
+        Escribe broker_status.json con snapshot global de forma atómica.
+
+        Lógica 24x7:
+            - Genera el JSON completo en memoria.
+            - Lo escribe en temporal sincronizado a disco.
+            - Hace replace() atómico sobre el destino final.
+        """
         try:
-            cfg.runtime_status.write_text(
-                json.dumps(self.snapshot(), ensure_ascii=False, indent=2, default=json_default),
-                encoding="utf-8",
+            payload = json.dumps(
+                self.snapshot(),
+                ensure_ascii=False,
+                indent=2,
+                default=json_default,
             )
+            write_text_atomic(cfg.runtime_status, payload, encoding="utf-8")
         except Exception:
             pass
 
@@ -1141,22 +1173,59 @@ class _NodeManagerBase(abc.ABC):
         })
 
     def _drain_sendq_once(self) -> None:
-        """Extrae un mensaje de la cola y lo envía."""
+        """
+        Extrae un mensaje de la cola y lo envía.
+
+        Lógica 24x7:
+            - No consume la cola si el nodo está en cooldown.
+            - Si el envío falla tras extraer el elemento, lo reinyecta al frente
+              lógico de la cola reconstruyendo la FIFO de forma segura.
+        """
+        if self.nd.tx_block_during_cooldown and self.state.cooldown_remaining() > 0:
+            self.state.set_sendq_size(self._sendq.qsize())
+            return
+
         try:
             item = self._sendq.get_nowait()
         except queue.Empty:
             self.state.set_sendq_size(self._sendq.qsize())
             return
+
         self.state.set_sendq_size(self._sendq.qsize())
+
         text = sanitize_text(str(item.get("text") or ""))
-        ch   = safe_int(item.get("ch", 0), 0)
+        ch = safe_int(item.get("ch", 0), 0)
         dest = item.get("dest") or None
-        ack  = bool(item.get("ack", False))
+        ack = bool(item.get("ack", False))
+
         if not text:
             return
-        if self.nd.tx_block_during_cooldown and self.state.cooldown_remaining() > 0:
-            raise RuntimeError("tx blocked by cooldown")
-        self._do_send(text=text, ch=ch, dest=dest, ack=ack)
+
+        try:
+            self._do_send(text=text, ch=ch, dest=dest, ack=ack)
+        except Exception:
+            self._requeue_front(item)
+            self.state.set_sendq_size(self._sendq.qsize())
+            raise
+        
+    def _requeue_front(self, item: dict) -> None:
+        """
+        Reinyecta un elemento al frente lógico de la cola FIFO.
+
+        Lógica 24x7:
+            - queue.Queue no soporta put_front nativo.
+            - Se reconstruye la cola preservando el orden del resto de mensajes.
+            - Solo se usa en rutas de error, no en el camino normal.
+        """
+        tmp: list[dict] = [item]
+        while True:
+            try:
+                tmp.append(self._sendq.get_nowait())
+            except queue.Empty:
+                break
+
+        for elem in tmp:
+            self._sendq.put_nowait(elem)    
     
     def _do_send(self, *, text: str, ch: int, dest: str | None, ack: bool) -> None:
         """
@@ -1239,45 +1308,70 @@ class _NodeManagerBase(abc.ABC):
         Normaliza el paquete, lo publica al hub con node_id y llama
         on_text_event si el portnum es TEXT_MESSAGE_APP.
 
+        Protección multi-instancia:
+            - El bus del SDK es global.
+            - Si hay varios managers Meshtastic activos, cada callback puede
+              recibir paquetes de otra interfaz.
+            - Se filtra por identidad de instancia para evitar duplicados,
+              atribución errónea de node_id y bucles de routing.
+
         Args:
             packet:    Dict con el paquete Meshtastic del SDK.
-            interface: Instancia de la interfaz (no usada directamente).
+            interface: Instancia de la interfaz que originó el paquete.
             topic:     Topic pubsub.
             **kwargs:  Parámetros adicionales del bus pubsub.
         """
+        current_iface = self._iface
+        incoming_iface = interface if interface is not None else kwargs.get("interface")
+
+        if current_iface is not None and incoming_iface is not None and incoming_iface is not current_iface:
+            return
+
         obj = packet if isinstance(packet, dict) else kwargs.get("packet")
         if not isinstance(obj, dict):
             obj = {}
+
         decoded = obj.get("decoded") if isinstance(obj.get("decoded"), dict) else {}
         portnum = str(decoded.get("portnum") or obj.get("portnum") or "UNKNOWN")
+
         record: dict[str, Any] = {
-            "ts": now_ts(), "iso": iso_now(), "type": "rx",
-            "source": "meshtastic", "node_id": self.nd.node_id, "alias": self.nd.alias,
+            "ts": now_ts(),
+            "iso": iso_now(),
+            "type": "rx",
+            "source": "meshtastic",
+            "node_id": self.nd.node_id,
+            "alias": self.nd.alias,
             "portnum": portnum,
-            "from":    obj.get("from") or obj.get("fromId"),
-            "to":      obj.get("to") or obj.get("toId"),
+            "from": obj.get("from") or obj.get("fromId"),
+            "to": obj.get("to") or obj.get("toId"),
             "channel": obj.get("channel") if obj.get("channel") is not None else obj.get("channelIndex"),
             "hop_limit": obj.get("hopLimit"),
             "hop_start": obj.get("hopStart"),
             "raw": obj,
         }
+
         text = decoded.get("text") if isinstance(decoded, dict) else None
         if isinstance(text, str) and text.strip():
             record["text"] = text.strip()
+
         position = decoded.get("position") if isinstance(decoded, dict) else None
         if isinstance(position, dict):
             record["position"] = position
             self._append_position(record)
+
         telemetry = decoded.get("telemetry") if isinstance(decoded, dict) else None
         if isinstance(telemetry, dict):
             record["telemetry"] = telemetry
+
         self.state.note_packet()
         self._emit_event(record)
+
         if portnum.upper() == "TEXT_MESSAGE_APP" and callable(self.on_text_event):
             try:
                 self.on_text_event(record)
             except Exception as exc:
-                log(f"{self.log_tag}[{self.nd.alias}] on_text_event error: {exc}")
+                log(f"{self.log_tag}[{self.nd.alias}] on_text_event error: {exc}")    
+
 
     def _append_position(self, record: dict) -> None:
         try:
@@ -1635,6 +1729,20 @@ class MeshCoreSerialManager(_NodeManagerBase):
 
     # --- Sobreescritura de start/stop: MeshCore usa asyncio en hilo propio ---
 
+    def _prune_recent_injected(self, now: float | None = None) -> None:
+        """
+        Elimina entradas expiradas del deduplicador temporal de inyección MeshCore.
+
+        Lógica 24x7:
+            - Evita crecimiento indefinido de memoria.
+            - Se invoca en puntos calientes de RX/TX, pero con coste lineal
+              únicamente sobre las claves vivas del deduplicador.
+        """
+        ts_now = now_ts() if now is None else float(now)
+        expired = [k for k, exp in self._recent_injected.items() if exp <= ts_now]
+        for k in expired:
+            self._recent_injected.pop(k, None)
+
     def start(self) -> None:
         """Arranca el hilo asyncio de MeshCore."""
         if not self._available:
@@ -1801,7 +1909,8 @@ class MeshCoreSerialManager(_NodeManagerBase):
                 self.state.set_connected(False, err)
                 log(f"{self.log_tag}[{self.nd.alias}] error: {err}")
                 await asyncio.sleep(backoff)
-                backoff = min(120.0, backoff * 1.8)
+                max_backoff = max(float(self.nd.reconnect_min_sec), float(self.nd.reconnect_max_sec))
+                backoff = min(max_backoff, backoff * 1.8)
 
     async def _meshcore_disconnect_clean(self) -> None:
         """Cierra una sesión MeshCore de forma segura para uso 24x7.
@@ -1929,9 +2038,11 @@ class MeshCoreSerialManager(_NodeManagerBase):
 
                 out_text = f"{head} {text}".strip()
                 fp = f"{out_ch}|{out_text}"
+                ts_now = now_ts()
+                self._prune_recent_injected(ts_now)
 
-                if self._recent_injected.get(fp, 0) < now_ts():
-                    self._recent_injected[fp] = now_ts() + self.nd.mc_inject_dedup_sec
+                if self._recent_injected.get(fp, 0) < ts_now:
+                    self._recent_injected[fp] = ts_now + self.nd.mc_inject_dedup_sec
                     record = {
                         "ts": now_ts(),
                         "iso": iso_now(),
@@ -2573,14 +2684,24 @@ class ControlServer:
         with conn:
             conn.settimeout(6.0)
             buf = b""
+            max_request_bytes = 256 * 1024
+
             try:
                 while not buf.endswith(b"\n"):
                     chunk = conn.recv(65535)
                     if not chunk:
                         break
                     buf += chunk
+                    if len(buf) > max_request_bytes:
+                        reply = {"ok": False, "error": f"request too large > {max_request_bytes} bytes"}
+                        conn.sendall(
+                            (json.dumps(reply, ensure_ascii=False, default=json_default) + "\n").encode()
+                        )
+                        log(f"[ctrl] {addr} cmd=<oversized> ok=False")
+                        return
             except socket.timeout:
                 pass
+
             raw = buf.decode("utf-8", errors="ignore").strip()
             if not raw:
                 reply = {"ok": False, "error": "empty request"}
@@ -2589,6 +2710,7 @@ class ControlServer:
                     reply = self._dispatch(json.loads(raw))
                 except Exception as exc:
                     reply = {"ok": False, "error": f"bad json: {exc}"}
+
             conn.sendall(
                 (json.dumps(reply, ensure_ascii=False, default=json_default) + "\n").encode()
             )

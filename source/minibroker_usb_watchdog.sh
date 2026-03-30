@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -u
-# minibroker_usb_watchdog_meshcore Version 2.1
+# minibroker_usb_watchdog_meshcore Version 4.2
 # Watchdog reforzado para entorno 24/7:
 # - Verifica que exista el USB real y el PTY virtual
 # - Retry inteligente con timeout en PTY
@@ -21,12 +21,21 @@ USB_VIRTUAL="/dev/ttyV0"
 SOCAT_SERVICE="meshtastic-socat.service"
 BROKER_SERVICE="minibroker-emergencias.service"
 DIREWOLF_SERVICE="direwolf.service"
+APRS_SERVICE="${APRS_SERVICE:-minibroker-aprs.service}"
 
 LOG_TAG="minibroker-usb-watchdog"
 
 log() {
     /usr/bin/logger -t "$LOG_TAG" "$1"
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"
+}
+
+restart_if_exists() {
+    local svc="$1"
+    if /usr/bin/systemctl cat "$svc" >/dev/null 2>&1; then
+        log "Reiniciando servicio asociado: $svc"
+        /usr/bin/systemctl restart "$svc"
+    fi
 }
 
 need_broker_restart=0
@@ -80,6 +89,7 @@ fi
 if [ "$need_broker_restart" -eq 1 ]; then
     log "Reiniciando broker: $BROKER_SERVICE"
     /usr/bin/systemctl restart "$BROKER_SERVICE"
+    restart_if_exists "$APRS_SERVICE"
     exit 0
 fi
 
@@ -187,10 +197,11 @@ PY
                 meshcore_ok_int=0
                 ;;
         esac
+
         silence=$((now - meshcore_ok_int))
-        
-        if [ "$silence" -gt 180 ]; then
-            log "MeshCore sin actividad >180s. Reiniciando $BROKER_SERVICE"
+        MESHCORE_WATCHDOG_SILENCE_SEC="${MESHCORE_WATCHDOG_SILENCE_SEC:-${MESHCORE_SILENCE_RECONNECT_SEC:-120}}"
+        if [ "$silence" -gt "$MESHCORE_WATCHDOG_SILENCE_SEC" ]; then
+            log "MeshCore sin actividad >${MESHCORE_WATCHDOG_SILENCE_SEC}s. Reiniciando $BROKER_SERVICE"
             /usr/bin/systemctl restart "$BROKER_SERVICE"
             exit 0
         fi
