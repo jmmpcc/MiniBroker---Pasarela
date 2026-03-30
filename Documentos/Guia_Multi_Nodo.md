@@ -525,6 +525,170 @@ MESHTASTIC_CH=0
 
 ---
 
+## **Escenario 3E**
+
+## **Nodo 1 = Meshtastic TCP + Nodo 2 = Meshtastic TCP (segundo) + Nodo 3 = MeshCore TCP**
+
+Despliegue completamente inalámbrico: ningún nodo conectado por USB, todos accesibles por red (WiFi o Ethernet).
+
+### **Servicio del broker**
+
+Variante: **sin USB**
+
+```
+[Unit]
+Description=MiniBroker Emergencias 24x7 (sin USB)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshnet
+Group=meshnet
+WorkingDirectory=/opt/minibroker
+EnvironmentFile=/opt/minibroker/.env-usb
+ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_broker.py --bind 127.0.0.1 --port 8765 --ctrl-host 127.0.0.1 --ctrl-port 8766 --data-dir /opt/minibroker/data
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+StartLimitBurst=0
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### **Servicios socat**
+
+- ninguno
+
+### **`.env-usb`** (sección nodos + routing)
+
+```
+MESHTASTIC_ENABLE=0
+MESHCORE_ENABLE=0
+
+NODE_1_TYPE=meshtastic_tcp
+NODE_1_ALIAS=meshtastic-tcp-1
+NODE_1_HOST=192.168.1.50
+NODE_1_TCP_PORT=4403
+NODE_1_PRIMARY=1
+NODE_1_DEAD_SILENCE_SEC=25
+NODE_1_TCP_DEAD_SILENCE_SEC=60
+NODE_1_LINK_CHECK_SEC=1.0
+NODE_1_COOLDOWN_SECS=90
+
+NODE_2_TYPE=meshtastic_tcp
+NODE_2_ALIAS=meshtastic-tcp-2
+NODE_2_HOST=192.168.1.51
+NODE_2_TCP_PORT=4403
+NODE_2_DEAD_SILENCE_SEC=25
+NODE_2_TCP_DEAD_SILENCE_SEC=60
+NODE_2_LINK_CHECK_SEC=1.0
+NODE_2_COOLDOWN_SECS=90
+
+NODE_3_TYPE=meshcore_tcp
+NODE_3_ALIAS=meshcore-tcp
+NODE_3_MC_TCP_HOST=192.168.1.60
+NODE_3_MC_TCP_PORT=4000
+NODE_3_MC_TCP_DEAD_SILENCE_SEC=60
+NODE_3_MC_CHANNEL_MAP=0:chan:0:PUBLIC
+NODE_3_MC_CHANIDX_TO_CH=0:0
+NODE_3_MC_RX_PREFIX_STYLE=alias
+NODE_3_MC_DEFAULT_CH=0
+NODE_3_MC_SILENCE_RECONNECT_SEC=90
+NODE_3_DEAD_SILENCE_SEC=25
+NODE_3_LINK_CHECK_SEC=1.0
+NODE_3_COOLDOWN_SECS=90
+
+NODE_AUTO_BRIDGE=1
+NODE_BRIDGE_CHANNELS=0
+```
+
+### **APRS**
+
+```
+APRS_GATE_ENABLED=1
+APRS_INBOUND_NODE_ALIASES=meshtastic-tcp-1,meshtastic-tcp-2
+MESHTASTIC_CH=0
+```
+
+---
+
+## **Escenario 3F**
+
+## **Nodo 1 = Meshtastic TCP + Nodo 2 = MeshCore TCP + Nodo 3 = MeshCore TCP (segundo)**
+
+Tres nodos TCP: un Meshtastic WiFi y dos MeshCore remotos (por ejemplo dos repetidores MeshCore en distintas ubicaciones).
+
+### **Servicio del broker**
+
+Variante: **sin USB**
+(mismo bloque de servicio que 3E)
+
+### **Servicios socat**
+
+- ninguno
+
+### **`.env-usb`** (sección nodos + routing)
+
+```
+MESHTASTIC_ENABLE=0
+MESHCORE_ENABLE=0
+
+NODE_1_TYPE=meshtastic_tcp
+NODE_1_ALIAS=meshtastic-tcp
+NODE_1_HOST=192.168.1.50
+NODE_1_TCP_PORT=4403
+NODE_1_PRIMARY=1
+NODE_1_DEAD_SILENCE_SEC=25
+NODE_1_TCP_DEAD_SILENCE_SEC=60
+NODE_1_LINK_CHECK_SEC=1.0
+NODE_1_COOLDOWN_SECS=90
+
+NODE_2_TYPE=meshcore_tcp
+NODE_2_ALIAS=meshcore-tcp-1
+NODE_2_MC_TCP_HOST=192.168.1.60
+NODE_2_MC_TCP_PORT=4000
+NODE_2_MC_TCP_DEAD_SILENCE_SEC=60
+NODE_2_MC_CHANNEL_MAP=0:chan:0:PUBLIC
+NODE_2_MC_CHANIDX_TO_CH=0:0
+NODE_2_MC_RX_PREFIX_STYLE=alias
+NODE_2_MC_DEFAULT_CH=0
+NODE_2_MC_SILENCE_RECONNECT_SEC=90
+NODE_2_DEAD_SILENCE_SEC=25
+NODE_2_LINK_CHECK_SEC=1.0
+NODE_2_COOLDOWN_SECS=90
+
+NODE_3_TYPE=meshcore_tcp
+NODE_3_ALIAS=meshcore-tcp-2
+NODE_3_MC_TCP_HOST=192.168.1.61
+NODE_3_MC_TCP_PORT=4000
+NODE_3_MC_TCP_DEAD_SILENCE_SEC=60
+NODE_3_MC_CHANNEL_MAP=0:chan:0:PUBLIC
+NODE_3_MC_CHANIDX_TO_CH=0:0
+NODE_3_MC_RX_PREFIX_STYLE=alias
+NODE_3_MC_DEFAULT_CH=0
+NODE_3_MC_SILENCE_RECONNECT_SEC=90
+NODE_3_DEAD_SILENCE_SEC=25
+NODE_3_LINK_CHECK_SEC=1.0
+NODE_3_COOLDOWN_SECS=90
+
+NODE_AUTO_BRIDGE=1
+NODE_BRIDGE_CHANNELS=0
+```
+
+### **APRS**
+
+```
+APRS_GATE_ENABLED=1
+APRS_INBOUND_NODE_ALIASES=meshtastic-tcp
+MESHTASTIC_CH=0
+```
+
+---
+
 # **6. Escenarios — 4 nodos**
 
 ---
@@ -711,6 +875,208 @@ NODE_BRIDGE_CHANNELS=0
 ```
 APRS_GATE_ENABLED=1
 APRS_INBOUND_NODE_ALIASES=meshtastic-usb-1,meshtastic-usb-2
+MESHTASTIC_CH=0
+```
+
+---
+
+## **Escenario 4C**
+
+## **Nodo 1 = Meshtastic TCP + Nodo 2 = Meshtastic TCP (segundo) + Nodo 3 = MeshCore TCP + Nodo 4 = MeshCore TCP (segundo)**
+
+Despliegue completamente inalámbrico con 4 nodos TCP: dos redes Meshtastic WiFi y dos redes MeshCore remotas, sin ningún USB físico en el servidor broker.
+
+### **Servicio del broker**
+
+Variante: **sin USB**
+
+```
+[Unit]
+Description=MiniBroker Emergencias 24x7 (sin USB)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshnet
+Group=meshnet
+WorkingDirectory=/opt/minibroker
+EnvironmentFile=/opt/minibroker/.env-usb
+ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_broker.py --bind 127.0.0.1 --port 8765 --ctrl-host 127.0.0.1 --ctrl-port 8766 --data-dir /opt/minibroker/data
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+StartLimitBurst=0
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### **Servicios socat**
+
+- ninguno
+
+### **`.env-usb`** (sección nodos + routing)
+
+```
+MESHTASTIC_ENABLE=0
+MESHCORE_ENABLE=0
+
+NODE_1_TYPE=meshtastic_tcp
+NODE_1_ALIAS=meshtastic-tcp-1
+NODE_1_HOST=192.168.1.50
+NODE_1_TCP_PORT=4403
+NODE_1_PRIMARY=1
+NODE_1_DEAD_SILENCE_SEC=25
+NODE_1_TCP_DEAD_SILENCE_SEC=60
+NODE_1_LINK_CHECK_SEC=1.0
+NODE_1_COOLDOWN_SECS=90
+
+NODE_2_TYPE=meshtastic_tcp
+NODE_2_ALIAS=meshtastic-tcp-2
+NODE_2_HOST=192.168.1.51
+NODE_2_TCP_PORT=4403
+NODE_2_DEAD_SILENCE_SEC=25
+NODE_2_TCP_DEAD_SILENCE_SEC=60
+NODE_2_LINK_CHECK_SEC=1.0
+NODE_2_COOLDOWN_SECS=90
+
+NODE_3_TYPE=meshcore_tcp
+NODE_3_ALIAS=meshcore-tcp-1
+NODE_3_MC_TCP_HOST=192.168.1.60
+NODE_3_MC_TCP_PORT=4000
+NODE_3_MC_TCP_DEAD_SILENCE_SEC=60
+NODE_3_MC_CHANNEL_MAP=0:chan:0:PUBLIC
+NODE_3_MC_CHANIDX_TO_CH=0:0
+NODE_3_MC_RX_PREFIX_STYLE=alias
+NODE_3_MC_DEFAULT_CH=0
+NODE_3_MC_SILENCE_RECONNECT_SEC=90
+NODE_3_DEAD_SILENCE_SEC=25
+NODE_3_LINK_CHECK_SEC=1.0
+NODE_3_COOLDOWN_SECS=90
+
+NODE_4_TYPE=meshcore_tcp
+NODE_4_ALIAS=meshcore-tcp-2
+NODE_4_MC_TCP_HOST=192.168.1.61
+NODE_4_MC_TCP_PORT=4000
+NODE_4_MC_TCP_DEAD_SILENCE_SEC=60
+NODE_4_MC_CHANNEL_MAP=0:chan:0:PUBLIC
+NODE_4_MC_CHANIDX_TO_CH=0:0
+NODE_4_MC_RX_PREFIX_STYLE=alias
+NODE_4_MC_DEFAULT_CH=0
+NODE_4_MC_SILENCE_RECONNECT_SEC=90
+NODE_4_DEAD_SILENCE_SEC=25
+NODE_4_LINK_CHECK_SEC=1.0
+NODE_4_COOLDOWN_SECS=90
+
+NODE_AUTO_BRIDGE=1
+NODE_BRIDGE_CHANNELS=0
+```
+
+Rutas generadas automáticamente (12 = 4×3):
+- `meshtastic-tcp-1:0 ↔ meshtastic-tcp-2:0`
+- `meshtastic-tcp-1:0 ↔ meshcore-tcp-1:0`
+- `meshtastic-tcp-1:0 ↔ meshcore-tcp-2:0`
+- `meshtastic-tcp-2:0 ↔ meshcore-tcp-1:0`
+- `meshtastic-tcp-2:0 ↔ meshcore-tcp-2:0`
+- `meshcore-tcp-1:0 ↔ meshcore-tcp-2:0`
+
+### **APRS**
+
+```
+APRS_GATE_ENABLED=1
+APRS_INBOUND_NODE_ALIASES=meshtastic-tcp-1,meshtastic-tcp-2
+MESHTASTIC_CH=0
+```
+
+---
+
+## **Escenario 4D**
+
+## **Nodo 1 = Meshtastic USB + Nodo 2 = Meshtastic TCP + Nodo 3 = MeshCore TCP + Nodo 4 = MeshCore TCP (segundo)**
+
+Un solo nodo USB local (Meshtastic) más tres nodos remotos TCP. Escenario habitual cuando el servidor broker está junto a un radio Meshtastic USB y los demás nodos son WiFi o de red.
+
+### **Servicio del broker**
+
+Variante: **Meshtastic USB**
+
+```
+[Unit]
+Description=MiniBroker Emergencias 24x7 (Meshtastic USB)
+After=network-online.target meshtastic-socat.service
+Wants=network-online.target
+Requires=meshtastic-socat.service
+```
+
+### **Servicios socat**
+
+- `meshtastic-socat.service`
+
+### **`.env-usb`** (sección nodos + routing)
+
+```
+MESHTASTIC_ENABLE=1
+MESHCORE_ENABLE=0
+
+NODE_1_TYPE=meshtastic_serial
+NODE_1_ALIAS=meshtastic-usb
+NODE_1_PORT=/dev/ttyV0
+NODE_1_PRIMARY=1
+NODE_1_BAUD=115200
+NODE_1_USB_LOCK=1
+NODE_1_DEAD_SILENCE_SEC=25
+NODE_1_LINK_CHECK_SEC=1.0
+NODE_1_COOLDOWN_SECS=90
+
+NODE_2_TYPE=meshtastic_tcp
+NODE_2_ALIAS=meshtastic-tcp
+NODE_2_HOST=192.168.1.50
+NODE_2_TCP_PORT=4403
+NODE_2_DEAD_SILENCE_SEC=25
+NODE_2_TCP_DEAD_SILENCE_SEC=60
+NODE_2_LINK_CHECK_SEC=1.0
+NODE_2_COOLDOWN_SECS=90
+
+NODE_3_TYPE=meshcore_tcp
+NODE_3_ALIAS=meshcore-tcp-1
+NODE_3_MC_TCP_HOST=192.168.1.60
+NODE_3_MC_TCP_PORT=4000
+NODE_3_MC_TCP_DEAD_SILENCE_SEC=60
+NODE_3_MC_CHANNEL_MAP=0:chan:0:PUBLIC
+NODE_3_MC_CHANIDX_TO_CH=0:0
+NODE_3_MC_RX_PREFIX_STYLE=alias
+NODE_3_MC_DEFAULT_CH=0
+NODE_3_MC_SILENCE_RECONNECT_SEC=90
+NODE_3_DEAD_SILENCE_SEC=25
+NODE_3_LINK_CHECK_SEC=1.0
+NODE_3_COOLDOWN_SECS=90
+
+NODE_4_TYPE=meshcore_tcp
+NODE_4_ALIAS=meshcore-tcp-2
+NODE_4_MC_TCP_HOST=192.168.1.61
+NODE_4_MC_TCP_PORT=4000
+NODE_4_MC_TCP_DEAD_SILENCE_SEC=60
+NODE_4_MC_CHANNEL_MAP=0:chan:0:PUBLIC
+NODE_4_MC_CHANIDX_TO_CH=0:0
+NODE_4_MC_RX_PREFIX_STYLE=alias
+NODE_4_MC_DEFAULT_CH=0
+NODE_4_MC_SILENCE_RECONNECT_SEC=90
+NODE_4_DEAD_SILENCE_SEC=25
+NODE_4_LINK_CHECK_SEC=1.0
+NODE_4_COOLDOWN_SECS=90
+
+NODE_AUTO_BRIDGE=1
+NODE_BRIDGE_CHANNELS=0
+```
+
+### **APRS**
+
+```
+APRS_GATE_ENABLED=1
+APRS_INBOUND_NODE_ALIASES=meshtastic-usb,meshtastic-tcp
 MESHTASTIC_CH=0
 ```
 
