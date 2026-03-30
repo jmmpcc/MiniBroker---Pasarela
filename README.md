@@ -732,15 +732,30 @@ WantedBy=multi-user.target
 
 ```bash
 # Arrancar todos
-sudo systemctl start meshtastic-socat minibroker-emergencias direwolf minibroker-aprs
+sudo systemctl start meshtastic-socat
+sudo systemctl start minibroker-emergencias
+sudo systemctl start direwolf
+sudo systemctl start minibroker-usb-watchdog.timer
+
+# Activar APRS (si forma parte del sistema)
+sudo systemctl start minibroker-aprs
 
 # Ver estado
-sudo systemctl status minibroker-emergencias minibroker-aprs
+sudo systemctl status meshtastic-socat minibroker-emergencias direwolf
+
+# Comprobar APRS (si forma parte del sistema y está activo)
+sudo systemctl status minibroker-aprs
 
 # Logs en tiempo real
 sudo journalctl -u minibroker-emergencias -f
 sudo journalctl -u minibroker-aprs -f
 sudo journalctl -u direwolf -f
+
+# Verificación completa tras la activación
+systemctl list-units --type=service | grep -E "minibroker|direwolf|socat"
+
+# Validación funcional mínima del broker (tramas que se están recibiendo)
+nc 127.0.0.1 8765
 
 # Reiniciar solo el broker (sin tocar socat ni Dire Wolf)
 sudo systemctl restart minibroker-emergencias

@@ -100,19 +100,25 @@ if ! /usr/bin/systemctl is-active --quiet "$BROKER_SERVICE"; then
     exit 0
 fi
 
-# 7) Supervisión adicional del puerto físico MeshCore embebido.
-#    Si desaparece el USB de MeshCore, se reinicia el broker para forzar
-#    una reconstrucción limpia de la sesión embebida y de sus descriptores.
-MESHCORE_ENABLE="${MESHCORE_ENABLE:-0}"
-MESHCORE_SERIAL="${MESHCORE_SERIAL_PORT:-/dev/ttyUSB1}"
+# 7) Supervisión de nodos MeshCore serial definidos como NODE_X_TYPE=meshcore_serial
+for idx in 1 2 3 4 5 6 7 8; do
+    eval "node_type=\${NODE_${idx}_TYPE:-}"
+    eval "node_port=\${NODE_${idx}_PORT:-}"
 
-if [ "$MESHCORE_ENABLE" = "1" ]; then
-    if [ ! -e "$MESHCORE_SERIAL" ]; then
-        log "MeshCore USB ausente: $MESHCORE_SERIAL. Reiniciando broker: $BROKER_SERVICE"
-        /usr/bin/systemctl restart "$BROKER_SERVICE"
-        exit 0
+    if [ "$node_type" = "meshcore_serial" ]; then
+        if [ -z "$node_port" ]; then
+            log "NODE_${idx}_TYPE=meshcore_serial pero NODE_${idx}_PORT no está definido. Reiniciando $BROKER_SERVICE"
+            /usr/bin/systemctl restart "$BROKER_SERVICE"
+            exit 0
+        fi
+
+        if [ ! -e "$node_port" ]; then
+            log "MeshCore serial ausente en NODE_${idx}: $node_port. Reiniciando broker: $BROKER_SERVICE"
+            /usr/bin/systemctl restart "$BROKER_SERVICE"
+            exit 0
+        fi
     fi
-fi
+done
 
 # 7.5) ⭐ NUEVO: Verificar salud de Direwolf (APRS)
 APRS_GATE_ENABLED="${APRS_GATE_ENABLED:-1}"
@@ -125,9 +131,6 @@ if [ "$APRS_GATE_ENABLED" = "1" ]; then
         sleep 2
     fi
 fi
-
-# 8) Comprobación de estado lógico del broker (anti-zombie)
-STATUS_FILE="/opt/minibroker/data/broker_status.json"
 
 # 8) Comprobación de estado lógico del broker (anti-zombie)
 #    Política corregida:
@@ -170,7 +173,7 @@ then
 fi
 
 # 9) ⭐ NUEVO: Supervisión extendida de MeshCore
-if [ "$MESHCORE_ENABLE" = "1" ] && [ -f "$STATUS_FILE" ]; then
+if [ -f "$STATUS_FILE" ]; then
     meshcore_ok=$(/usr/bin/python3 - <<'PY' "$STATUS_FILE"
 import json, sys
 try:
