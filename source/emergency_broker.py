@@ -376,10 +376,20 @@ class ChannelRouter:
         """
         Construye el router desde variables de entorno NODE_ROUTE_N.
 
+        Si NODE_AUTO_BRIDGE=1, genera además rutas bidireccionales completas
+        entre todos los nodos activos (aquellos con NODE_N_TYPE definido).
+        Los canales incluidos se controlan con NODE_BRIDGE_CHANNELS (default: 0).
+
+        Para nodos MeshCore, NODE_BRIDGE_CHANNELS usa números de canal broker.
+        La traducción a channel_idx nativo de MeshCore la realizan mc_chanidx_to_ch
+        (RX) y mc_channel_map (TX) configurados por nodo.
+
         Returns:
             ChannelRouter configurado con todas las reglas encontradas.
         """
         rules: list[RouteRule] = []
+
+        # ---- Fase 1: reglas manuales NODE_ROUTE_N ----
         for idx in range(1, 64):
             raw = os.getenv(f"NODE_ROUTE_{idx}", "").strip()
             if not raw:
@@ -389,6 +399,55 @@ class ChannelRouter:
                 rules.append(rule)
                 log(f"[router] ruta {idx}: {rule.src.alias}:{rule.src.channel} "
                     f"-> {rule.dst.alias}:{rule.dst.channel}")
+
+        # ---- Fase 2: puente automático NODE_AUTO_BRIDGE ----
+        if truthy(os.getenv("NODE_AUTO_BRIDGE", "0")):
+            # Recoger aliases de todos los nodos configurados (NODE_1 .. NODE_32)
+            auto_aliases: list[str] = []
+            for idx in range(1, 33):
+                if not os.getenv(f"NODE_{idx}_TYPE", "").strip():
+                    continue
+                alias = os.getenv(f"NODE_{idx}_ALIAS", f"node_{idx}").strip()
+                if alias and alias not in auto_aliases:
+                    auto_aliases.append(alias)
+
+            # Canales broker a incluir (default: solo el 0)
+            bridge_channels: list[int] = []
+            for part in os.getenv("NODE_BRIDGE_CHANNELS", "0").split(","):
+                try:
+                    bridge_channels.append(int(part.strip()))
+                except ValueError:
+                    log(f"[router] NODE_BRIDGE_CHANNELS: valor inválido '{part}'; ignorado")
+            if not bridge_channels:
+                bridge_channels = [0]
+
+            # Conjunto de reglas ya existentes para evitar duplicados
+            existing: set[tuple[str, int, str]] = {
+                (r.src.alias, r.src.channel, r.dst.alias) for r in rules
+            }
+
+            # Generar malla bidireccional completa
+            added = 0
+            for src_alias in auto_aliases:
+                for dst_alias in auto_aliases:
+                    if src_alias == dst_alias:
+                        continue
+                    for ch in bridge_channels:
+                        key = (src_alias, ch, dst_alias)
+                        if key in existing:
+                            continue
+                        rule = RouteRule(
+                            src=RouteEndpoint(alias=src_alias, channel=ch),
+                            dst=RouteEndpoint(alias=dst_alias, channel=ch),
+                        )
+                        rules.append(rule)
+                        existing.add(key)
+                        added += 1
+                        log(f"[router] auto-bridge: {src_alias}:{ch} -> {dst_alias}:{ch}")
+
+            log(f"[router] NODE_AUTO_BRIDGE activo: {len(auto_aliases)} nodo(s), "
+                f"canales={bridge_channels}, {added} regla(s) generada(s)")
+
         return cls(rules)
 
     @staticmethod
