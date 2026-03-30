@@ -56,6 +56,16 @@ def safe_int(value: Any, default: int) -> int:
         return int(default)
 
 
+def safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return truthy(value, default)
+    return default
+
+
 def now_ts() -> float:
     return time.time()
 
@@ -171,7 +181,10 @@ class BrokerControlClient:
 
     def send_text(self, *, ch: int, text: str, dest: str | None = None, ack: bool = False) -> dict:
         """Envía texto al nodo PRIMARY del broker (comportamiento legacy)."""
-        return self.request("SEND_TEXT", {"text": text, "ch": int(ch), "dest": dest, "ack": bool(ack)})
+        return self.request(
+            "SEND_TEXT",
+            {"text": text, "ch": int(ch), "dest": dest, "ack": safe_bool(ack, False)},
+        )
 
     def send_text_to_node(
         self,
@@ -196,7 +209,7 @@ class BrokerControlClient:
         """
         return self.request(
             "SEND_TEXT",
-            {"text": text, "ch": int(ch), "dest": dest, "ack": bool(ack), "alias": node_alias},
+            {"text": text, "ch": int(ch), "dest": dest, "ack": safe_bool(ack, False), "alias": node_alias},
         )
 
     def broadcast_text(
@@ -220,7 +233,7 @@ class BrokerControlClient:
         """
         return self.request(
             "BROADCAST_TEXT",
-            {"text": text, "ch": int(ch), "dest": dest, "ack": bool(ack)},
+            {"text": text, "ch": int(ch), "dest": dest, "ack": safe_bool(ack, False)},
         )
 
 

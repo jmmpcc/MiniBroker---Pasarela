@@ -1063,7 +1063,7 @@ class _NodeManagerBase(abc.ABC):
                 "text": text,
                 "ch":   safe_int(item.get("ch", 0), 0),
                 "dest": item.get("dest") or None,
-                "ack":  bool(item.get("ack", False)),
+                "ack":  safe_bool(item.get("ack", False), False),
             })
             self.state.set_sendq_size(self._sendq.qsize())
             return {"ok": True, "queued": True}
@@ -1196,8 +1196,7 @@ class _NodeManagerBase(abc.ABC):
         text = sanitize_text(str(item.get("text") or ""))
         ch = safe_int(item.get("ch", 0), 0)
         dest = item.get("dest") or None
-        ack = bool(item.get("ack", False))
-
+        ack  = safe_bool(item.get("ack", False), False)
         if not text:
             return
 
@@ -1796,7 +1795,7 @@ class MeshCoreSerialManager(_NodeManagerBase):
                 "text": text,
                 "ch":   safe_int(item.get("ch", 0), 0),
                 "dest": item.get("dest") or None,
-                "ack":  bool(item.get("ack", False)),
+                "ack":  safe_bool(item.get("ack", False), False),
             })
             self.state.set_sendq_size(self._sendq.qsize())
             return {"ok": True, "queued": True}
