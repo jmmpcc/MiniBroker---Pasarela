@@ -628,7 +628,8 @@ class AprsIsClient:
         try:
             self.connect()
             with self._lock:
-                assert self._client is not None
+                if self._client is None:
+                    return False
                 self._client.sendall(str(line).rstrip("\r\n") + "\n")
             return True
         except Exception as exc:
@@ -656,8 +657,12 @@ class AprsIsClient:
         while not self._stop.is_set():
             try:
                 self.connect()
-                assert self._client is not None
-                self._client.consumer(callback, raw=False, immortal=False)
+                with self._lock:
+                    client = self._client
+                if client is None:
+                    time.sleep(1.0)
+                    continue
+                client.consumer(callback, raw=False, immortal=False)
                 if not self._stop.is_set():
                     raise RuntimeError("APRS-IS consumer finalizado inesperadamente")
             except Exception as exc:
@@ -963,7 +968,7 @@ class EmergencyAprsBridge:
         ok_rf = True
         for payload in payloads:
             await self._throttle_tx()
-            ok = await asyncio.to_thread(self._tx_rf_payload, payload=payload, dest_hdr=rf_dest)
+            ok = await asyncio.to_thread(self._tx_aprs_payload, payload=payload, dest_hdr=rf_dest)
             ok_rf = ok_rf and ok
             await asyncio.sleep(0.12)
 
@@ -1045,10 +1050,14 @@ class EmergencyAprsBridge:
         with self._kiss_tx_sock_lock:
             try:
                 if self._kiss_tx_sock is None:
-                    sock = socket.create_connection((self.cfg.kiss_host, self.cfg.kiss_port), timeout=3.0)
-                    sock.settimeout(3.0)
-                    self._kiss_init(sock)
-                    self._kiss_tx_sock = sock
+                    _new = socket.create_connection((self.cfg.kiss_host, self.cfg.kiss_port), timeout=3.0)
+                    try:
+                        _new.settimeout(3.0)
+                        self._kiss_init(_new)
+                    except Exception:
+                        _new.close()
+                        raise
+                    self._kiss_tx_sock = _new
                 self._kiss_tx_sock.sendall(kiss)
                 return True
             except Exception as exc:
