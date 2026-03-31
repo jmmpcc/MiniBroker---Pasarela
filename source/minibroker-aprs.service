@@ -1,7 +1,8 @@
 [Unit]
-Description=MiniBroker APRS Bridge. Version 2.0
-After=network.target direwolf.service minibroker-emergencias.service
-Requires=direwolf.service minibroker-emergencias.service
+Description=MiniBroker APRS Bridge. Version 2.1
+After=network.target minibroker-emergencias.service
+Wants=minibroker-emergencias.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -10,9 +11,12 @@ Group=meshnet
 WorkingDirectory=/opt/minibroker
 EnvironmentFile=/opt/minibroker/.env-usb
 ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_aprs_bridge.py
-Restart=always
+
+# El bridge debe seguir vivo y reconectar por sí mismo.
+# No debe reiniciarse por una parada "limpia" inducida por dependencias externas.
+Restart=on-failure
 RestartSec=3
-StartLimitIntervalSec=0
+
 
 [Install]
 WantedBy=multi-user.target

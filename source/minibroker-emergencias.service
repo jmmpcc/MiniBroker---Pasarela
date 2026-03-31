@@ -1,5 +1,5 @@
 [Unit]
-Description=MiniBroker Emergencias USB 24x7. Version 2.0
+Description=MiniBroker Emergencias USB 24x7. Version 2.1
 After=network-online.target meshtastic-socat.service
 Wants=network-online.target
 Requires=meshtastic-socat.service
@@ -10,10 +10,14 @@ User=meshnet
 Group=meshnet
 WorkingDirectory=/opt/minibroker
 EnvironmentFile=/opt/minibroker/.env-usb
+
+# Espera real a que el pseudoTTY exista antes de arrancar el broker
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 20); do [ -e /dev/ttyV0 ] && exit 0; sleep 1; done; echo "ERROR: /dev/ttyV0 no existe"; exit 1'
+
 ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_broker.py --bind 127.0.0.1 --port 8765 --ctrl-host 127.0.0.1 --ctrl-port 8766 --data-dir /opt/minibroker/data
 Restart=always
 RestartSec=5
-TimeoutStopSec=20
+TimeoutStopSec=30
 StartLimitBurst=0
 NoNewPrivileges=true
 PrivateTmp=true

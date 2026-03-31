@@ -1,13 +1,20 @@
 [Unit]
-Description=Dire Wolf APRS TNC. Version 2.0
+Description=Dire Wolf APRS TNC. Version 2.1
 After=network.target sound.target
+Wants=network.target sound.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=meshnet
+Group=meshnet
+WorkingDirectory=/opt/minibroker
+EnvironmentFile=/opt/minibroker/.env-usb
+ExecCondition=/bin/bash -lc '. /opt/minibroker/.env-usb; v="${APRS_GATE_ENABLED:-1}"; [[ "$v" = "1" || "$v" = "true" || "$v" = "yes" || "$v" = "on" || "$v" = "si" || "$v" = "sí" ]]'
 ExecStart=/usr/local/bin/direwolf -c /etc/direwolf.conf -t 0
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

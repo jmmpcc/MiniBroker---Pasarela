@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Version 4.2 emergency_broker -> MiniBroker multi-nodo: Meshtastic Serial + TCP + MeshCore.
+Version 4.3 emergency_broker -> MiniBroker multi-nodo: Meshtastic Serial + TCP + MeshCore.
 
 Diseño:
 - N nodos activos simultáneamente, cada uno con su propio manager y sendq.
@@ -682,18 +682,40 @@ class JsonlHub:
                 self._drop(s)
 
     def _flush_clients(self) -> None:
+        """Drena buffers pendientes y purga clientes cerrados por el peer.
+
+        Lógica 24x7:
+            - Si hay datos pendientes, intenta enviarlos.
+            - Aunque no haya datos pendientes, comprueba si el peer ha cerrado
+            la conexión usando recv(..., MSG_PEEK) en modo no bloqueante.
+            - Si el peer cerró (EOF) o hay error de socket, elimina el cliente.
+        """
         with self._lock:
             for sock, bl in list(self._clients.items()):
-                if not bl:
-                    continue
+                # 1) Si hay datos pendientes, intentar flush
+                if bl:
+                    try:
+                        sent = sock.send(bl)
+                        if sent > 0:
+                            del bl[:sent]
+                    except (BlockingIOError, InterruptedError):
+                        pass
+                    except Exception:
+                        self._drop(sock)
+                        continue
+
+                # 2) Detectar peer cerrado aunque no haya buffer pendiente
                 try:
-                    sent = sock.send(bl)
-                    if sent > 0:
-                        del bl[:sent]
+                    data = sock.recv(1, socket.MSG_PEEK)
+                    if data == b"":
+                        self._drop(sock)
+                        continue
                 except (BlockingIOError, InterruptedError):
-                    continue
+                    # No hay datos y el socket sigue vivo
+                    pass
                 except Exception:
                     self._drop(sock)
+                    continue
 
     def _drop(self, sock: socket.socket) -> None:
         try:
@@ -1820,13 +1842,48 @@ class MeshCoreSerialManager(_NodeManagerBase):
         self._async_thread.start()
 
     def stop(self) -> None:
-        """Para el manager MeshCore."""
+        """Para el manager MeshCore de forma ordenada y segura para 24x7.
+
+        Lógica aplicada:
+            - No se detiene el loop abruptamente con loop.stop().
+            - Se señaliza primero la parada mediante ``self._stop``.
+            - Se inyecta un despertar en la cola asyncio para romper esperas
+            de ``asyncio.wait_for(..., timeout=0.5)`` sin depender del timeout.
+            - Se espera al hilo async un tiempo razonable para permitir que
+            ``_amain()`` cierre la sesión MeshCore, drene tareas pendientes
+            y cierre el loop de forma limpia.
+            - Solo si el hilo no termina en plazo, se fuerza ``loop.stop()``
+            como último recurso defensivo.
+
+        Returns:
+            None.
+        """
         self._stop.set()
-        if self._async_loop and self._async_loop.is_running():
-            self._async_loop.call_soon_threadsafe(self._async_loop.stop)
-        if self._async_thread and self._async_thread.is_alive():
-            self._async_thread.join(timeout=4.0)
         self.state.set_status("stopping")
+
+        loop = self._async_loop
+        tx_q = self._async_tx_q
+
+        if loop and loop.is_running() and tx_q is not None:
+            try:
+                loop.call_soon_threadsafe(
+                    tx_q.put_nowait,
+                    ({"kind": "__shutdown__", "target": -1}, ""),
+                )
+            except Exception:
+                pass
+
+        if self._async_thread and self._async_thread.is_alive():
+            self._async_thread.join(timeout=8.0)
+
+        if self._async_thread and self._async_thread.is_alive():
+            if loop and loop.is_running():
+                try:
+                    loop.call_soon_threadsafe(loop.stop)
+                except Exception:
+                    pass
+            self._async_thread.join(timeout=2.0)
+
         self._iface = None
 
     def enqueue_send(self, item: dict) -> dict:
@@ -1948,44 +2005,124 @@ class MeshCoreSerialManager(_NodeManagerBase):
                 raise RuntimeError(f"meshcore flush enqueue error: {exc}")
 
     def _async_runner(self) -> None:
-        """Punto de entrada del hilo asyncio."""
+        """Punto de entrada del hilo asyncio de MeshCore.
+
+        Política 24x7:
+            - El loop se crea y fija explícitamente en el hilo actual.
+            - ``_amain()`` termina por señal de parada o por error supervisado.
+            - Antes de cerrar el loop se drenan tareas pendientes para evitar
+            cierres abruptos y warnings de asyncio.
+
+        Returns:
+            None.
+        """
         loop = asyncio.new_event_loop()
         self._async_loop = loop
+        asyncio.set_event_loop(loop)
+
         try:
             loop.run_until_complete(self._amain())
+            loop.run_until_complete(self._shutdown_asyncio_runtime())
         except Exception as exc:
-            log(f"{self.log_tag}[{self.nd.alias}] loop error: {exc}")
+            log(f"{self.log_tag}[{self.nd.alias}] loop error: {type(exc).__name__}: {exc}")
         finally:
-            loop.close()
+            try:
+                loop.close()
+            except Exception as exc:
+                log(f"{self.log_tag}[{self.nd.alias}] loop close warning: {type(exc).__name__}: {exc}")
+            finally:
+                self._async_loop = None
+                self._async_tx_q = None
+
+    async def _shutdown_asyncio_runtime(self) -> None:
+        """Drena y cancela tareas pendientes del loop asyncio propio.
+
+        Esta rutina se ejecuta al final del hilo async de MeshCore, antes de
+        cerrar el event loop. Su objetivo es evitar advertencias del tipo
+        ``Task was destroyed but it is pending!`` procedentes de tareas internas
+        de la librería MeshCore o de callbacks suscritos.
+
+        Lógica 24x7 aplicada:
+            1. Recoge todas las tareas vivas del loop actual excepto la propia.
+            2. Las cancela de forma cooperativa.
+            3. Espera su finalización con ``return_exceptions=True`` para no
+            propagar CancelledError ni excepciones residuales.
+            4. Cede una última vez el control al loop para drenar callbacks.
+
+        Returns:
+            None.
+        """
+        try:
+            current = asyncio.current_task()
+            pending = [
+                t for t in asyncio.all_tasks()
+                if t is not current and not t.done()
+            ]
+
+            for task in pending:
+                task.cancel()
+
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            await asyncio.sleep(0)
+        except Exception as exc:
+            log(f"{self.log_tag}[{self.nd.alias}] shutdown warning: {type(exc).__name__}: {exc}")
+
+
 
     async def _amain(self) -> None:
-        """Bucle supervisor asyncio con backoff."""
+        """Bucle supervisor asyncio con parada cooperativa y backoff.
+
+        Lógica 24x7 aplicada:
+            - Mantiene una cola async persistente para TX.
+            - Supervisa reconexiones con backoff progresivo.
+            - Si se solicita parada, sale sin intentar nuevos sleeps de backoff.
+            - Maneja explícitamente CancelledError para no dejar el cierre a medias.
+
+        Returns:
+            None.
+        """
         self._async_tx_q = asyncio.Queue()
         backoff = 2.0
+
         while not self._stop.is_set():
             try:
                 await self._session_once()
                 backoff = 2.0
+
+            except asyncio.CancelledError:
+                break
+
             except Exception as exc:
+                if self._stop.is_set():
+                    break
+
                 err = f"{type(exc).__name__}: {exc}"
                 self.state.set_connected(False, err)
                 log(f"{self.log_tag}[{self.nd.alias}] error: {err}")
-                await asyncio.sleep(backoff)
+
+                try:
+                    await asyncio.wait_for(asyncio.sleep(backoff), timeout=backoff + 0.25)
+                except asyncio.CancelledError:
+                    break
+                except Exception:
+                    if self._stop.is_set():
+                        break
+
                 max_backoff = float(self.nd.reconnect_max_sec)
                 backoff = min(max_backoff, backoff * 1.8)
 
     async def _meshcore_disconnect_clean(self) -> None:
         """Cierra una sesión MeshCore de forma segura para uso 24x7.
 
-        Esta rutina evita dejar tareas asyncio internas de meshcore pendientes
-        al reconectar o detener la sesión. Es idempotente: si no hay engine
-        activo, no hace nada.
-
         Lógica:
-            1. Desvincula primero las referencias locales (_engine, _iface).
-            2. Intenta desconectar el engine si existe.
-            3. Cede control al loop para que las cancelaciones internas se drenen.
-            4. No propaga excepciones de cierre para no romper el supervisor.
+            1. Desvincula referencias locales antes de cerrar.
+            2. Intenta detener el engine sin propagar errores de cierre.
+            3. Cede varias veces el control al loop para drenar callbacks,
+            cancelaciones y tareas internas residuales.
+            4. Nunca fuerza ``loop.stop()`` aquí; el cierre del loop pertenece
+            exclusivamente al runner del hilo.
 
         Returns:
             None.
@@ -2000,17 +2137,21 @@ class MeshCoreSerialManager(_NodeManagerBase):
 
         try:
             await engine.disconnect()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             log(
                 f"{self.log_tag}[{self.nd.alias}] "
                 f"disconnect warning: {type(exc).__name__}: {exc}"
             )
 
-        try:
-            # Dar una oportunidad al loop para drenar tareas internas canceladas.
-            await asyncio.sleep(0.20)
-        except Exception:
-            pass   
+        for _ in range(3):
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                break 
 
     async def _session_once(self) -> None:
         """
@@ -2147,8 +2288,16 @@ class MeshCoreSerialManager(_NodeManagerBase):
                 target, text = await asyncio.wait_for(self._async_tx_q.get(), timeout=0.5)
             except asyncio.TimeoutError:
                 continue
+            except asyncio.CancelledError:
+                break
+
+            if isinstance(target, dict) and str(target.get("kind")) == "__shutdown__":
+                break
 
             for part in self._split_utf8(text, self.nd.mc_max_text_bytes):
+                if self._stop.is_set():
+                    break
+
                 if isinstance(target, dict) and str(target.get("kind")) == "chan":
                     await engine.commands.send_chan_msg(int(target["target"]), part)
                 else:
@@ -2163,7 +2312,11 @@ class MeshCoreSerialManager(_NodeManagerBase):
                     await engine.commands.send_msg(send_target, part)
 
                 last_rx_ts = now_ts()
-                await asyncio.sleep(0.15)
+
+                try:
+                    await asyncio.sleep(0.15)
+                except asyncio.CancelledError:
+                    break
 
         await self._meshcore_disconnect_clean()
         self.state.set_connected(False, "stopped")
@@ -2454,8 +2607,16 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
                     target, text = await asyncio.wait_for(self._async_tx_q.get(), timeout=0.5)
                 except asyncio.TimeoutError:
                     continue
+                except asyncio.CancelledError:
+                    break
+
+                if isinstance(target, dict) and str(target.get("kind")) == "__shutdown__":
+                    break
 
                 for part in self._split_utf8(text, self.nd.mc_max_text_bytes):
+                    if self._stop.is_set():
+                        break
+
                     try:
                         if isinstance(target, dict) and str(target.get("kind")) == "chan":
                             await engine.commands.send_chan_msg(int(target["target"]), part)
@@ -2475,7 +2636,10 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
                             f"{type(exc).__name__}: {exc}"
                         ) from exc
 
-                    await asyncio.sleep(0.15)
+                    try:
+                        await asyncio.sleep(0.15)
+                    except asyncio.CancelledError:
+                        break
         finally:
             await self._meshcore_disconnect_clean()
             self.state.set_connected(False, "stopped")

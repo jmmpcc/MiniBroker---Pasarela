@@ -705,13 +705,27 @@ class EmergencyAprsBridge:
         self._kiss_tx_sock_lock = threading.Lock()
 
     async def run(self) -> None:
+        """
+        Arranca la pasarela APRS <-> MiniBroker.
+
+        Política 24x7:
+            - El bridge broker->APRS siempre puede ejecutarse.
+            - La parte KISS RX sólo debe arrancar si APRS_GATE_ENABLED=1.
+            - APRS-IS sólo arranca si hay credenciales válidas.
+        """
         self._loop = asyncio.get_running_loop()
-        tasks = [
+        tasks: list[asyncio.Task] = [
             asyncio.create_task(self.task_broker_to_aprs(), name="broker-to-aprs"),
-            asyncio.create_task(self.task_kiss_rx_to_mesh(), name="kiss-to-mesh"),
         ]
+
+        if self.cfg.aprs_gate_enabled:
+            tasks.append(asyncio.create_task(self.task_kiss_rx_to_mesh(), name="kiss-to-mesh"))
+        else:
+            _print_ts("[aprs] APRS_GATE_ENABLED=0 -> KISS RX deshabilitado")
+
         if self.aprsis.enabled:
             self.aprsis.start_consumer(self._on_aprsis_packet)
+
         try:
             await self._stop.wait()
         finally:
@@ -719,6 +733,7 @@ class EmergencyAprsBridge:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self.aprsis.stop()
+            self._close_kiss_tx_sock()
 
     def stop(self) -> None:
         self._stop.set()

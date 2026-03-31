@@ -658,7 +658,7 @@ WantedBy=multi-user.target
 
 ```ini
 [Unit]
-Description=MiniBroker Emergencias USB 24x7
+Description=MiniBroker Emergencias USB 24x7. Version 2.1
 After=network-online.target meshtastic-socat.service
 Wants=network-online.target
 Requires=meshtastic-socat.service
@@ -669,16 +669,14 @@ User=meshnet
 Group=meshnet
 WorkingDirectory=/opt/minibroker
 EnvironmentFile=/opt/minibroker/.env-usb
-ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_broker.py \
-    --mesh-port /dev/ttyV0 \
-    --bind 127.0.0.1 \
-    --port 8765 \
-    --ctrl-host 127.0.0.1 \
-    --ctrl-port 8766 \
-    --data-dir /opt/minibroker/data
+
+# Espera real a que el pseudoTTY exista antes de arrancar el broker
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 20); do [ -e /dev/ttyV0 ] && exit 0; sleep 1; done; echo "ERROR: /dev/ttyV0 no existe"; exit 1'
+
+ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_broker.py --bind 127.0.0.1 --port 8765 --ctrl-host 127.0.0.1 --ctrl-port 8766 --data-dir /opt/minibroker/data
 Restart=always
 RestartSec=5
-TimeoutStopSec=20
+TimeoutStopSec=30
 StartLimitBurst=0
 NoNewPrivileges=true
 PrivateTmp=true
@@ -691,15 +689,22 @@ WantedBy=multi-user.target
 
 ```ini
 [Unit]
-Description=Dire Wolf APRS TNC
+Description=Dire Wolf APRS TNC. Version 2.1
 After=network.target sound.target
+Wants=network.target sound.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=meshnet
+Group=meshnet
+WorkingDirectory=/opt/minibroker
+EnvironmentFile=/opt/minibroker/.env-usb
+ExecCondition=/bin/bash -lc '. /opt/minibroker/.env-usb; v="${APRS_GATE_ENABLED:-1}"; [[ "$v" = "1" || "$v" = "true" || "$v" = "yes" || "$v" = "on" || "$v" = "si" || "$v" = "sí" ]]'
 ExecStart=/usr/local/bin/direwolf -c /etc/direwolf.conf -t 0
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
@@ -709,9 +714,10 @@ WantedBy=multi-user.target
 
 ```ini
 [Unit]
-Description=MiniBroker APRS Bridge
-After=network.target direwolf.service minibroker-emergencias.service
-Requires=direwolf.service minibroker-emergencias.service
+Description=MiniBroker APRS Bridge. Version 2.1
+After=network.target minibroker-emergencias.service
+Wants=minibroker-emergencias.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -720,9 +726,12 @@ Group=meshnet
 WorkingDirectory=/opt/minibroker
 EnvironmentFile=/opt/minibroker/.env-usb
 ExecStart=/opt/minibroker/venv/bin/python /opt/minibroker/emergency_aprs_bridge.py
-Restart=always
+
+# El bridge debe seguir vivo y reconectar por sí mismo.
+# No debe reiniciarse por una parada "limpia" inducida por dependencias externas.
+Restart=on-failure
 RestartSec=3
-StartLimitIntervalSec=0
+
 
 [Install]
 WantedBy=multi-user.target
