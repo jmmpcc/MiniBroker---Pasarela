@@ -130,8 +130,10 @@ NODE_TYPE_MESH_SERIAL = "meshtastic_serial"
 NODE_TYPE_MESH_TCP    = "meshtastic_tcp"
 NODE_TYPE_MC_SERIAL   = "meshcore_serial"
 NODE_TYPE_MC_TCP      = "meshcore_tcp"
-_VALID_NODE_TYPES     = {NODE_TYPE_MESH_SERIAL, NODE_TYPE_MESH_TCP,
-                         NODE_TYPE_MC_SERIAL,   NODE_TYPE_MC_TCP}
+_VALID_NODE_TYPES      = {NODE_TYPE_MESH_SERIAL, NODE_TYPE_MESH_TCP,
+                          NODE_TYPE_MC_SERIAL,   NODE_TYPE_MC_TCP}
+_MESHTASTIC_NODE_TYPES = {NODE_TYPE_MESH_SERIAL, NODE_TYPE_MESH_TCP}
+_MESHCORE_NODE_TYPES   = {NODE_TYPE_MC_SERIAL,   NODE_TYPE_MC_TCP}
 
 
 @dataclass
@@ -171,6 +173,8 @@ class NodeDescriptor:
         mc_inject_dedup_sec: Ventana de deduplicación inyección MeshCore->Mesh.
         mc_silence_reconnect_sec: Segundos de silencio antes de reconectar MeshCore.
         mc_max_text_bytes: Límite de bytes por fragmento MeshCore.
+        region: Etiqueta geográfica/lógica opcional (ej. "ZARAGOZA"). Heredada de BROKER_REGION.
+        mc_propagate_meshtastic: Si False, el nodo MeshCore no recibirá mensajes de origen Meshtastic.
     """
     node_id:   str   = ""
     alias:     str   = ""
@@ -208,8 +212,11 @@ class NodeDescriptor:
     mc_rx_prefix_style:       str   = "alias"
     mc_default_ch:            int   = 0
     mc_inject_dedup_sec:      float = 12.0
-    mc_silence_reconnect_sec: int   = 120
-    mc_max_text_bytes:        int   = 180
+    mc_silence_reconnect_sec:   int   = 120
+    mc_max_text_bytes:          int   = 180
+
+    region:                    str  = ""
+    mc_propagate_meshtastic:   bool = True
 
     def endpoint(self) -> str:
         """Cadena legible del endpoint de conexión."""
@@ -281,10 +288,14 @@ def _load_node_descriptors_from_env() -> list[NodeDescriptor]:
             mc_inject_dedup_sec = float(os.getenv(f"{prefix}MC_INJECT_DEDUP_SEC", os.getenv("MESHCORE_INJECT_DEDUP_SEC", "12"))),
             mc_silence_reconnect_sec = safe_int(os.getenv(f"{prefix}MC_SILENCE_RECONNECT_SEC", os.getenv("MESHCORE_SILENCE_RECONNECT_SEC", "120")), 120),
             mc_max_text_bytes   = safe_int(os.getenv(f"{prefix}MC_MAX_TEXT_BYTES", os.getenv("MESHCORE_MAX_TEXT_BYTES", "180")), 180),
+            region               = os.getenv(f"{prefix}REGION", os.getenv("BROKER_REGION", "")).strip(),
+            mc_propagate_meshtastic = truthy(os.getenv(f"{prefix}MC_PROPAGATE_MESHTASTIC",
+                                                        os.getenv("BROKER_MC_PROPAGATE_MESHTASTIC", "1")), True),
         )
         nodes.append(nd)
         log(f"[cfg] nodo: {nd.node_id} alias={nd.alias} type={nd.node_type} "
-            f"endpoint={nd.endpoint()} primary={nd.primary}")
+            f"endpoint={nd.endpoint()} primary={nd.primary} "
+            f"region={nd.region!r} mc_propagate_meshtastic={nd.mc_propagate_meshtastic}")
     return nodes
 
 
@@ -2820,12 +2831,19 @@ class NodeManager:
         text      = sanitize_text(str(record.get("text") or ""))
         if not text or not src_alias:
             return
+        src_mgr = self._by_alias.get(src_alias)
+        src_is_meshtastic = src_mgr is not None and src_mgr.nd.node_type in _MESHTASTIC_NODE_TYPES
         for dst in self.router.destinations(src_alias, channel):
             if dst.alias == src_alias:
                 continue  # evitar eco en el mismo nodo
             dst_mgr = self._by_alias.get(dst.alias)
             if dst_mgr is None:
                 log(f"[router] destino desconocido: alias='{dst.alias}'")
+                continue
+            if src_is_meshtastic and dst_mgr.nd.node_type in _MESHCORE_NODE_TYPES \
+                    and not dst_mgr.nd.mc_propagate_meshtastic:
+                log(f"[router] bloqueo: {src_alias} (Meshtastic) -> {dst.alias} (MeshCore) "
+                    f"mc_propagate_meshtastic=False")
                 continue
             result = dst_mgr.enqueue_send({"text": text, "ch": dst.channel, "dest": None, "ack": False})
             log(f"[router] {src_alias}:{channel} -> {dst.alias}:{dst.channel} "
