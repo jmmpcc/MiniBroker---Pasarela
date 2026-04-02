@@ -167,6 +167,7 @@ class NodeDescriptor:
         mc_chanidx_to_ch: Mapa chanidx->canal.
         mc_aliases: Aliases de contactos MeshCore.
         mc_rx_prefix_style: "alias" o "prefix" para el encabezado RX.
+        mc_flood_scope: Scope opcional de propagación MeshCore (ej. "#zgz").
         mc_default_ch: Canal Meshtastic por defecto para MeshCore sin mapeo.
         mc_inject_dedup_sec: Ventana de deduplicación inyección MeshCore->Mesh.
         mc_silence_reconnect_sec: Segundos de silencio antes de reconectar MeshCore.
@@ -206,6 +207,7 @@ class NodeDescriptor:
     mc_chanidx_to_ch:         str   = ""
     mc_aliases:               str   = ""
     mc_rx_prefix_style:       str   = "alias"
+    mc_flood_scope:           str   = ""
     mc_default_ch:            int   = 0
     mc_inject_dedup_sec:      float = 12.0
     mc_silence_reconnect_sec: int   = 120
@@ -277,6 +279,7 @@ def _load_node_descriptors_from_env() -> list[NodeDescriptor]:
             mc_chanidx_to_ch    = os.getenv(f"{prefix}MC_CHANIDX_TO_CH", os.getenv("MESHCORE_CHANIDX_TO_CH", "")),
             mc_aliases          = os.getenv(f"{prefix}MC_ALIASES", os.getenv("MESHCORE_CONTACT_ALIASES", "")),
             mc_rx_prefix_style  = os.getenv(f"{prefix}MC_RX_PREFIX_STYLE", os.getenv("MESHCORE_RX_PREFIX_STYLE", "alias")),
+            mc_flood_scope      = os.getenv(f"{prefix}MC_FLOOD_SCOPE", os.getenv("MESHCORE_FLOOD_SCOPE", "")).strip(),
             mc_default_ch       = safe_int(os.getenv(f"{prefix}MC_DEFAULT_CH", os.getenv("MESHCORE_CONTACT_DEFAULT_CH", "0")), 0),
             mc_inject_dedup_sec = float(os.getenv(f"{prefix}MC_INJECT_DEDUP_SEC", os.getenv("MESHCORE_INJECT_DEDUP_SEC", "12"))),
             mc_silence_reconnect_sec = safe_int(os.getenv(f"{prefix}MC_SILENCE_RECONNECT_SEC", os.getenv("MESHCORE_SILENCE_RECONNECT_SEC", "120")), 120),
@@ -1967,9 +1970,7 @@ class MeshCoreSerialManager(_NodeManagerBase):
             if not text:
                 continue
 
-            clean_text = text
-            if not clean_text.startswith("[MT]"):
-                clean_text = f"[MT] {clean_text}"
+            clean_text = self._decorate_mt_text(text)
 
             mapping = self._channel_map.get(ch)
             if mapping:
@@ -1985,7 +1986,6 @@ class MeshCoreSerialManager(_NodeManagerBase):
                     self._async_tx_q.put_nowait,
                     (target, clean_text),
                 )
-                moved += 1
                 self._emit_event({
                     "type": "tx",
                     "source": "broker",
@@ -1996,6 +1996,7 @@ class MeshCoreSerialManager(_NodeManagerBase):
                     "destination": dest,
                     "text": clean_text,
                 })
+                moved += 1
             except Exception as exc:
                 try:
                     self._sendq.put_nowait(item)
@@ -2003,6 +2004,21 @@ class MeshCoreSerialManager(_NodeManagerBase):
                     pass
                 self.state.set_sendq_size(self._sendq.qsize())
                 raise RuntimeError(f"meshcore flush enqueue error: {exc}")
+
+    def _decorate_mt_text(self, text: str) -> str:
+        """
+        Normaliza texto de salida Meshtastic->MeshCore.
+
+        Reglas:
+            - Garantiza prefijo ``[MT]``.
+        """
+        clean_text = sanitize_text(str(text or ""))
+        if not clean_text:
+            return ""
+
+        if not clean_text.startswith("[MT]"):
+            clean_text = f"[MT] {clean_text}"
+        return clean_text
 
     def _async_runner(self) -> None:
         """Punto de entrada del hilo asyncio de MeshCore.
@@ -2153,6 +2169,26 @@ class MeshCoreSerialManager(_NodeManagerBase):
             except Exception:
                 break 
 
+    async def _apply_meshcore_flood_scope(self, engine) -> None:
+        """
+        Aplica `set_flood_scope` al conectar si hay configuración explícita.
+
+        `send_chan_msg`/`send_msg` no exponen un parámetro "region" por mensaje
+        en meshcore_py; el control nativo de propagación se configura por scope.
+        """
+        scope = str(self.nd.mc_flood_scope or "").strip()
+        if not scope:
+            return
+        try:
+            result = await engine.commands.set_flood_scope(scope)
+            ev_type = str(getattr(result, "type", "")).lower()
+            if "error" in ev_type:
+                log(f"{self.log_tag}[{self.nd.alias}] set_flood_scope('{scope}') error: {getattr(result, 'payload', None)}")
+            else:
+                log(f"{self.log_tag}[{self.nd.alias}] flood_scope aplicado: {scope}")
+        except Exception as exc:
+            log(f"{self.log_tag}[{self.nd.alias}] set_flood_scope('{scope}') warning: {type(exc).__name__}: {exc}")
+
     async def _session_once(self) -> None:
         """
         Abre sesión MeshCore, suscribe eventos y procesa cola TX.
@@ -2193,6 +2229,8 @@ class MeshCoreSerialManager(_NodeManagerBase):
             await engine.start_auto_message_fetching()
         except Exception:
             pass
+
+        await self._apply_meshcore_flood_scope(engine)
 
         async def _on_mc_msg(event) -> None:
             nonlocal last_rx_ts
@@ -2355,9 +2393,7 @@ class MeshCoreSerialManager(_NodeManagerBase):
             if not clean_text:
                 raise RuntimeError("empty text")
 
-            # Prefijo de origen Meshtastic -> MeshCore
-            if not clean_text.startswith("[MT]"):
-                clean_text = f"[MT] {clean_text}"
+            clean_text = self._decorate_mt_text(clean_text)
 
             mapping = self._channel_map.get(ch)
             if mapping:
@@ -2519,6 +2555,8 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
             await engine.start_auto_message_fetching()
         except Exception:
             pass
+
+        await self._apply_meshcore_flood_scope(engine)
 
         async def _on_mc_msg(event) -> None:
             try:

@@ -487,6 +487,7 @@ NODE_3_MC_CHANIDX_TO_CH=0:0,1:2
 # Alias para mostrar en el prefijo [MC:alias]
 # NODE_3_MC_ALIASES=abcdef123456:PEPE
 NODE_3_MC_RX_PREFIX_STYLE=alias    # alias | prefix
+NODE_3_MC_FLOOD_SCOPE=#zgz         # opcional: scope nativo MeshCore para propagación
 NODE_3_MC_DEFAULT_CH=0
 # NODE_3_MC_SILENCE_RECONNECT_SEC=120
 ```
@@ -502,8 +503,14 @@ NODE_4_MC_TCP_PORT=4000             # Puerto por defecto de MeshCore (≠ 4403)
 NODE_4_MC_CHANNEL_MAP=0:chan:0:PUBLIC
 NODE_4_MC_CHANIDX_TO_CH=0:0
 NODE_4_MC_RX_PREFIX_STYLE=alias
+NODE_4_MC_FLOOD_SCOPE=#norte       # opcional, útil para filtros de repetidores
 NODE_4_MC_DEFAULT_CH=0
 ```
+
+`NODE_N_MC_FLOOD_SCOPE` (o global `MESHCORE_FLOOD_SCOPE`) usa el comando nativo
+de MeshCore `set_flood_scope(scope)` al conectar el nodo. Úsalo con formato
+de scope de MeshCore (por ejemplo `#zgz`) para que la propagación se controle
+en la propia red MeshCore, en lugar de inyectar etiquetas en el texto.
 
 > **Compatibilidad v2/v3:** Si no se define `NODE_1_TYPE`, el broker arranca en  
 > modo legacy usando `MESH_CONN_MODE` / `MESH_USB_PORT` / `MESH_TCP_HOST`.  
