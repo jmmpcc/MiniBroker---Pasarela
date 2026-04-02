@@ -558,7 +558,7 @@ APRS_PATH=WIDE1-1,WIDE2-1
 
 # APRS-IS (dejar vacío para deshabilitar)
 APRSIS_USER=EA2XXX
-APRSIS_PASSCODE=12345               # Calcular en aprs.do/apps/passcode/
+APRSIS_PASSCODE=XXXXX               # Calcular en aprs.do/apps/passcode/
 APRSIS_HOST=rotate.aprs2.net
 APRSIS_PORT=14580
 APRSIS_FILTER=                      # Filtro APRS-IS (vacío = sin filtro)

@@ -321,6 +321,29 @@ def _call_ssid_parts(call: str) -> tuple[str, int]:
     return base[:6].ljust(6), max(0, min(15, ssid))
 
 
+def normalize_aprs_call(call: str) -> str:
+    """Normaliza indicativos APRS a MAYÚSCULAS y elimina '-0' explícito.
+
+    Ejemplos:
+      EA1ABC    -> EA1ABC
+      ea1abc-0  -> EA1ABC
+      EA1ABC-9  -> EA1ABC-9
+    """
+    s = (call or "").strip().upper()
+    if not s:
+        return ""
+    if "-" not in s:
+        return s
+    base, ssid_text = s.split("-", 1)
+    try:
+        ssid = int(ssid_text)
+    except Exception:
+        return s
+    if ssid == 0:
+        return base
+    return f"{base}-{ssid}"
+
+
 def _addr_field(call: str, *, last: bool) -> bytes:
     base, ssid = _call_ssid_parts(call)
     out = bytearray(7)
@@ -968,6 +991,9 @@ class EmergencyAprsBridge:
         if not final_payload_text:
             _print_ts("[broker->aprs] omitido: texto vacío tras sanitizar")
             return
+        if not (self.cfg.aprs_call or "").strip():
+            _print_ts("[broker->aprs] omitido: APRS_CALL vacío (no se puede transmitir por KISS/Dire Wolf)")
+            return
 
         if self._dedup_seen(dest_norm, final_payload_text):
             _print_ts(f"[broker->aprs] duplicado omitido dest={dest_norm}")
@@ -1153,14 +1179,20 @@ class EmergencyAprsBridge:
                     tal como devuelve parse_ax25_ui o aprslib.
             source: 'rf' o 'is' — origen de la trama para logging y dedup.
         """
-        src = str(pkt.get("src") or "").strip().upper()
+        src_raw = str(pkt.get("src") or "").strip().upper()
+        src = normalize_aprs_call(src_raw)
 
         # Filtro 1: origen permitido
-        if self.cfg.aprs_allowed_sources and src not in set(self.cfg.aprs_allowed_sources):
+        allowed_sources = {normalize_aprs_call(s) for s in self.cfg.aprs_allowed_sources}
+        if allowed_sources and src not in allowed_sources:
             return
 
         # Filtro 2: anti-eco (no procesar tramas propias)
-        if src and src in {self.cfg.aprs_call.upper(), self.cfg.aprsis_user.upper()}:
+        self_calls = {
+            normalize_aprs_call(self.cfg.aprs_call),
+            normalize_aprs_call(self.cfg.aprsis_user),
+        }
+        if src and src in self_calls:
             return
 
         text = sanitize_text(str(pkt.get("text") or pkt.get("info") or ""))
