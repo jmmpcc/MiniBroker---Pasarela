@@ -172,43 +172,85 @@ then
     exit 0
 fi
 
-# 9) ⭐ NUEVO: Supervisión extendida de MeshCore
-if [ -f "$STATUS_FILE" ]; then
-    meshcore_ok=$(/usr/bin/python3 - <<'PY' "$STATUS_FILE"
-import json, sys
+# 9) Supervisión de MeshCore basada en estado de conexión, no en tráfico.
+#    Política 24x7:
+#    - Si MeshCore está en running/connecting/reconnecting/starting, no tocar nada.
+#    - Solo contar ciclos cuando todos los nodos MeshCore estén realmente disconnected.
+#    - Si permanece disconnected más de N ciclos consecutivos, reiniciar broker.
+MESHCORE_WATCHDOG_STATE_FILE="/opt/minibroker/data/meshcore_watchdog_state.txt"
+MESHCORE_WATCHDOG_DISCONNECTED_CYCLES="${MESHCORE_WATCHDOG_DISCONNECTED_CYCLES:-3}"
+
+if [ "$MESHCORE_ENABLE" = "1" ] && [ -f "$STATUS_FILE" ]; then
+    meshcore_state=$(/usr/bin/python3 - <<'PY' "$STATUS_FILE"
+import json
+import sys
+
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as fh:
         data = json.load(fh)
+
     nodes = data.get("nodes") or []
-    candidates = []
-    for node in nodes:
-        if str(node.get("type") or "").startswith("meshcore"):
-            v = node.get("last_packet_ts")
-            if v is not None:
-                candidates.append(float(v))
-    print("" if not candidates else max(candidates))
+    mesh_nodes = [
+        n for n in nodes
+        if str(n.get("type") or "").strip().lower().startswith("meshcore")
+    ]
+
+    if not mesh_nodes:
+        print("absent")
+        raise SystemExit(0)
+
+    statuses = {
+        str(n.get("status") or "").strip().lower()
+        for n in mesh_nodes
+    }
+
+    healthy_states = {"running", "connecting", "reconnecting", "starting"}
+    if statuses & healthy_states:
+        print("healthy")
+    elif statuses == {"disconnected"}:
+        print("disconnected")
+    else:
+        print("other")
+
 except Exception:
-    print("")
+    print("error")
 PY
 )
-    now=$(date +%s)
-    
-    if [ -n "$meshcore_ok" ]; then
-        meshcore_ok_int="${meshcore_ok%.*}"
-        case "$meshcore_ok_int" in
-            ''|*[!0-9]*)
-                meshcore_ok_int=0
-                ;;
-        esac
 
-        silence=$((now - meshcore_ok_int))
-        MESHCORE_WATCHDOG_SILENCE_SEC="${MESHCORE_WATCHDOG_SILENCE_SEC:-${MESHCORE_SILENCE_RECONNECT_SEC:-120}}"
-        if [ "$silence" -gt "$MESHCORE_WATCHDOG_SILENCE_SEC" ]; then
-            log "MeshCore sin actividad >${MESHCORE_WATCHDOG_SILENCE_SEC}s. Reiniciando $BROKER_SERVICE"
-            /usr/bin/systemctl restart "$BROKER_SERVICE"
-            exit 0
-        fi
+    disconnected_cycles=0
+    if [ -f "$MESHCORE_WATCHDOG_STATE_FILE" ]; then
+        disconnected_cycles="$(cat "$MESHCORE_WATCHDOG_STATE_FILE" 2>/dev/null || echo 0)"
     fi
+
+    case "$disconnected_cycles" in
+        ''|*[!0-9]*)
+            disconnected_cycles=0
+            ;;
+    esac
+
+    case "$meshcore_state" in
+        healthy|other|absent)
+            if [ "$disconnected_cycles" -ne 0 ]; then
+                echo "0" > "$MESHCORE_WATCHDOG_STATE_FILE"
+            fi
+            ;;
+        disconnected)
+            disconnected_cycles=$((disconnected_cycles + 1))
+            echo "$disconnected_cycles" > "$MESHCORE_WATCHDOG_STATE_FILE"
+
+            if [ "$disconnected_cycles" -gt "$MESHCORE_WATCHDOG_DISCONNECTED_CYCLES" ]; then
+                log "MeshCore en estado disconnected durante ${disconnected_cycles} ciclos consecutivos. Reiniciando $BROKER_SERVICE"
+                echo "0" > "$MESHCORE_WATCHDOG_STATE_FILE"
+                /usr/bin/systemctl restart "$BROKER_SERVICE"
+                exit 0
+            else
+                log "MeshCore disconnected: ciclo ${disconnected_cycles}/${MESHCORE_WATCHDOG_DISCONNECTED_CYCLES}"
+            fi
+            ;;
+        error|*)
+            log "No se pudo evaluar el estado de MeshCore desde $STATUS_FILE. No se reinicia por precaución."
+            ;;
+    esac
 fi
 
 log "OK: USB real y pseudoTTY presentes; servicios activos"
