@@ -273,7 +273,19 @@ def _load_node_descriptors_from_env() -> list[NodeDescriptor]:
             mc_baud             = safe_int(os.getenv(f"{prefix}BAUD", os.getenv("MESHCORE_SERIAL_BAUD", "115200")), 115200),
             mc_tcp_host         = os.getenv(f"{prefix}MC_TCP_HOST", os.getenv("MESHCORE_TCP_HOST", "")).strip(),
             mc_tcp_port         = safe_int(os.getenv(f"{prefix}MC_TCP_PORT", os.getenv("MESHCORE_TCP_PORT", "4000")), 4000),
-            mc_tcp_dead_silence_sec = float(os.getenv(f"{prefix}MC_TCP_DEAD_SILENCE_SEC", os.getenv("MESHCORE_TCP_DEAD_SILENCE_SEC", "60"))),
+            # meshcore_tcp:
+            # - Preferir variable específica MC_TCP_DEAD_SILENCE_SEC.
+            # - Compatibilidad: si no existe, reutilizar MC_SILENCE_RECONNECT_SEC
+            #   a nivel de nodo (caso habitual en despliegues existentes).
+            mc_tcp_dead_silence_sec = float(
+                os.getenv(
+                    f"{prefix}MC_TCP_DEAD_SILENCE_SEC",
+                    os.getenv(
+                        f"{prefix}MC_SILENCE_RECONNECT_SEC",
+                        os.getenv("MESHCORE_TCP_DEAD_SILENCE_SEC", "60"),
+                    ),
+                )
+            ),
             mc_channel_map      = os.getenv(f"{prefix}MC_CHANNEL_MAP",  os.getenv("MESHCORE_CHANNEL_MAP", "")),
             mc_contact_to_ch    = os.getenv(f"{prefix}MC_CONTACT_TO_CH", os.getenv("MESHCORE_CONTACT_TO_CH", "")),
             mc_chanidx_to_ch    = os.getenv(f"{prefix}MC_CHANIDX_TO_CH", os.getenv("MESHCORE_CHANIDX_TO_CH", "")),
@@ -2484,9 +2496,11 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
 
     Política de estabilidad 24x7:
         - Mantener la sesión TCP mientras el engine siga operativo.
-        - Reconectar solo ante error real de conexión, suscripción,
-          envío o caída efectiva de la sesión.
-        - No usar la ausencia de tráfico RX como criterio único de reconexión.
+        - Reconectar ante error real de conexión, suscripción, envío
+          o caída efectiva de la sesión.
+        - Incluir sonda anti-zombie opcional: verificar periódicamente
+          flags internos de enlace TCP del engine y forzar reconexión
+          si se detecta sesión cerrada/caída.
 
     Según la API oficial de meshcore_py:
         engine = await MeshCore.create_tcp("192.168.1.100", 4000)
@@ -2512,14 +2526,68 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
                 f"(NODE_N_MC_TCP_HOST o MESHCORE_TCP_HOST)"
             )
 
+    async def _engine_link_alive(self, engine) -> tuple[bool, str | None]:
+        """
+        Intenta inferir si la sesión TCP sigue viva usando flags del engine.
+
+        No depende de tráfico RX/TX: solo de señales explícitas de estado
+        interno (connected/closed/alive) cuando están disponibles.
+        """
+        async def _as_value(v):
+            try:
+                if callable(v):
+                    v = v()
+                if asyncio.iscoroutine(v):
+                    v = await v
+                return v
+            except Exception:
+                return None
+
+        checks = (
+            ("is_connected", False),
+            ("connected", False),
+            ("is_alive", False),
+            ("alive", False),
+            ("closed", True),
+            ("is_closed", True),
+        )
+
+        probe_objs = [engine]
+        for attr in ("client", "_client", "ws", "_ws", "socket", "_socket", "transport", "_transport"):
+            try:
+                obj = getattr(engine, attr, None)
+            except Exception:
+                obj = None
+            if obj is not None:
+                probe_objs.append(obj)
+
+        for obj in probe_objs:
+            for attr, inverted in checks:
+                try:
+                    if not hasattr(obj, attr):
+                        continue
+                    raw = await _as_value(getattr(obj, attr))
+                    if raw is None:
+                        continue
+                    val = bool(raw)
+                    if inverted:
+                        val = not val
+                    if not val:
+                        return False, f"{type(obj).__name__}.{attr}"
+                except Exception:
+                    continue
+        return True, None
+
     async def _session_once(self) -> None:
         """Abre sesión MeshCore por TCP, suscribe eventos y procesa cola TX.
 
         Política de estabilidad 24x7:
             - Mantener la sesión TCP mientras siga operativa.
-            - Reconectar solo ante error real de create_tcp(), subscribe(),
+            - Reconectar ante error real de create_tcp(), subscribe(),
               send_chan_msg(), send_msg() o cierre/caída efectiva del engine.
-            - No usar el silencio RX como criterio único de desconexión.
+            - Activar sonda anti-zombie opcional:
+              cada ``mc_tcp_dead_silence_sec`` (si > 0), revisar flags
+              internos de conexión para detectar sesiones TCP caídas.
 
         Raises:
             ValueError:   Si mc_tcp_host está vacío.
@@ -2550,6 +2618,7 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
             "mc_host": host,
             "mc_port": port,
         })
+        last_link_probe_ts = 0.0
 
         try:
             await engine.start_auto_message_fetching()
@@ -2638,6 +2707,16 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
             while not self._stop.is_set():
                 if self._engine is None or self._iface is None:
                     raise RuntimeError(f"meshcore tcp session dropped ({host}:{port})")
+
+                probe_every = float(self.nd.mc_tcp_dead_silence_sec)
+                if probe_every > 0 and (now_ts() - last_link_probe_ts) >= probe_every:
+                    last_link_probe_ts = now_ts()
+                    alive, why = await self._engine_link_alive(engine)
+                    if not alive:
+                        raise RuntimeError(
+                            f"meshcore tcp engine link down ({host}:{port})"
+                            + (f": {why}" if why else "")
+                        )
                  
                 self._flush_pending_sendq_to_async()
                 
