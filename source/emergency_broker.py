@@ -122,6 +122,54 @@ def sanitize_text(text: str) -> str:
     return " ".join((text or "").replace("\r", " ").replace("\n", " ").split())
 
 
+def _fmt_last_heard(ts: float | None) -> str:
+    """Tiempo relativo o absoluto desde un timestamp Unix."""
+    if ts is None:
+        return "---"
+    try:
+        delta = time.time() - float(ts)
+    except Exception:
+        return "---"
+    if delta < 0:
+        return time.strftime("%m/%d %H:%M", time.localtime(ts))
+    if delta < 60:
+        return f"hace {int(delta)}s"
+    if delta < 3600:
+        return f"hace {int(delta / 60)}m"
+    if delta < 86400:
+        return f"hace {int(delta / 3600)}h {int((delta % 3600) / 60)}m"
+    return time.strftime("%m/%d %H:%M", time.localtime(ts))
+
+
+def _log_node_table(tag: str, alias: str, node_type: str, rows: list) -> None:
+    """Emite al log una tabla ASCII con los nodos escuchados por una interfaz.
+
+    rows: lista de dicts con claves node_id, long_name, short_name,
+          last_heard_ts (float|None), snr (float|None).
+    """
+    C_IDX, C_ID, C_LONG, C_SHORT, C_SEEN, C_SNR = 3, 15, 22, 6, 17, 6
+    hdr = (f"{'#':>{C_IDX}}  {'ID':<{C_ID}}  {'Nombre':<{C_LONG}}  "
+           f"{'Corto':<{C_SHORT}}  {'Visto':<{C_SEEN}}  {'SNR':>{C_SNR}}")
+    sep = (f"{'─' * C_IDX}  {'─' * C_ID}  {'─' * C_LONG}  "
+           f"{'─' * C_SHORT}  {'─' * C_SEEN}  {'─' * C_SNR}")
+    n = len(rows)
+    log(f"{tag}[{alias}] nodos escuchados ({node_type}) \u2014 {n} nodo(s)")
+    if not rows:
+        return
+    log(f"{tag}  {hdr}")
+    log(f"{tag}  {sep}")
+    for i, r in enumerate(rows, 1):
+        long_name  = str(r.get("long_name")  or "(sin nombre)")[:C_LONG]
+        short_name = str(r.get("short_name") or "????")[:C_SHORT]
+        node_id    = str(r.get("node_id")    or "?")[:C_ID]
+        seen       = _fmt_last_heard(r.get("last_heard_ts"))[:C_SEEN]
+        snr_raw    = r.get("snr")
+        snr        = f"{float(snr_raw):.1f}" if snr_raw is not None else "---"
+        log(f"{tag}  {i:>{C_IDX}}  {node_id:<{C_ID}}  {long_name:<{C_LONG}}  "
+            f"{short_name:<{C_SHORT}}  {seen:<{C_SEEN}}  {snr:>{C_SNR}}")
+    log(f"{tag}  {sep}")
+
+
 # ======================================================================================
 # Descriptor de nodo
 # ======================================================================================
@@ -1488,6 +1536,28 @@ class _NodeManagerBase(abc.ABC):
         self.journal.append(payload)
         self.hub.publish(payload)
 
+    def _log_meshtastic_nodes(self) -> None:
+        """Muestra en log la tabla de nodos conocidos por la interfaz Meshtastic."""
+        try:
+            iface = self._iface
+            if iface is None:
+                return
+            raw_nodes = getattr(iface, "nodes", None) or {}
+            rows = []
+            for node_info in raw_nodes.values():
+                user = node_info.get("user", {}) if isinstance(node_info, dict) else {}
+                rows.append({
+                    "node_id":       user.get("id") or str(node_info.get("num", "?")),
+                    "long_name":     user.get("longName"),
+                    "short_name":    user.get("shortName"),
+                    "last_heard_ts": node_info.get("lastHeard"),
+                    "snr":           node_info.get("snr"),
+                })
+            rows.sort(key=lambda r: -(r.get("last_heard_ts") or 0))
+            _log_node_table(self.log_tag, self.nd.alias, self.nd.node_type, rows)
+        except Exception as exc:
+            log(f"{self.log_tag}[{self.nd.alias}] no se pudo leer nodeDB: {exc}")
+
 
 # ======================================================================================
 # Meshtastic Serial
@@ -1542,6 +1612,7 @@ class MeshtasticSerialManager(_NodeManagerBase):
             self.state.set_connected(True)
             self.state.set_status("running")
             log(f"{self.log_tag}[{self.nd.alias}] conectado a {self.nd.port}")
+            self._log_meshtastic_nodes()
             self._emit_event({"type": "status", "subtype": "connected", "source": "meshtastic",
                               "conn_mode": "serial", "portnum": "BROKER_STATUS", "mesh_port": self.nd.port})
         except Exception:
@@ -1660,6 +1731,7 @@ class MeshtasticTcpManager(_NodeManagerBase):
             self.state.set_connected(True)
             self.state.set_status("running")
             log(f"{self.log_tag}[{self.nd.alias}] conectado a {host}:{port}")
+            self._log_meshtastic_nodes()
             self._emit_event({"type": "status", "subtype": "connected", "source": "meshtastic",
                               "conn_mode": "tcp", "portnum": "BROKER_STATUS",
                               "tcp_host": host, "tcp_port": port})
@@ -2201,6 +2273,68 @@ class MeshCoreSerialManager(_NodeManagerBase):
         except Exception as exc:
             log(f"{self.log_tag}[{self.nd.alias}] set_flood_scope('{scope}') warning: {type(exc).__name__}: {exc}")
 
+    async def _log_meshcore_nodes(self, engine) -> None:
+        """Muestra en log la tabla de contactos MeshCore conocidos por el engine."""
+        try:
+            rows = []
+            contacts = None
+            for attr in ("contacts", "get_contacts", "peer_list", "nodes"):
+                val = getattr(engine, attr, None)
+                if val is None:
+                    continue
+                if callable(val):
+                    try:
+                        result = val()
+                        if asyncio.iscoroutine(result):
+                            result = await result
+                        val = result
+                    except Exception:
+                        continue
+                if val is not None:
+                    contacts = val
+                    break
+
+            if contacts:
+                contact_list = list(contacts.values() if isinstance(contacts, dict) else contacts)
+                for c in contact_list:
+                    if isinstance(c, dict):
+                        prefix = c.get("pubkey_prefix") or c.get("id") or "?"
+                        rows.append({
+                            "node_id":       prefix,
+                            "long_name":     c.get("alias") or c.get("name"),
+                            "short_name":    c.get("shortName"),
+                            "last_heard_ts": c.get("last_seen") or c.get("lastHeard"),
+                            "snr":           None,
+                        })
+                    else:
+                        prefix = str(getattr(c, "pubkey_prefix", "") or
+                                     getattr(c, "id", "") or "?")
+                        alias = (getattr(c, "alias", None) or
+                                 getattr(c, "name", None) or
+                                 self._aliases.get(prefix))
+                        rows.append({
+                            "node_id":       prefix,
+                            "long_name":     alias,
+                            "short_name":    None,
+                            "last_heard_ts": (getattr(c, "last_seen", None) or
+                                              getattr(c, "lastHeard", None)),
+                            "snr":           None,
+                        })
+            elif self._aliases:
+                for prefix, alias in self._aliases.items():
+                    rows.append({
+                        "node_id":       prefix,
+                        "long_name":     alias,
+                        "short_name":    None,
+                        "last_heard_ts": None,
+                        "snr":           None,
+                    })
+
+            rows.sort(key=lambda r: -(r.get("last_heard_ts") or 0))
+            _log_node_table(self.log_tag, self.nd.alias, self.nd.node_type, rows)
+        except Exception as exc:
+            log(f"{self.log_tag}[{self.nd.alias}] no se pudo leer contactos: {exc}")
+
     async def _session_once(self) -> None:
         """
         Abre sesión MeshCore, suscribe eventos y procesa cola TX.
@@ -2243,6 +2377,7 @@ class MeshCoreSerialManager(_NodeManagerBase):
             pass
 
         await self._apply_meshcore_flood_scope(engine)
+        await self._log_meshcore_nodes(engine)
 
         async def _on_mc_msg(event) -> None:
             nonlocal last_rx_ts
@@ -2626,6 +2761,7 @@ class MeshCoreTcpManager(MeshCoreSerialManager):
             pass
 
         await self._apply_meshcore_flood_scope(engine)
+        await self._log_meshcore_nodes(engine)
 
         async def _on_mc_msg(event) -> None:
             try:
